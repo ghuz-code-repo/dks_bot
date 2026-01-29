@@ -5,3 +5,7 @@ python-dotenv
 apscheduler
 openpyxl
 aiohttp
+
+# Testing
+pytest
+pytest-asyncio
