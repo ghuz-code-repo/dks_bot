@@ -104,18 +104,19 @@ async def contract_entered(message: types.Message, state: FSMContext):
             contract.telegram_id = message.from_user.id
             session.commit()
 
+        # Получаем лимит слотов
+        limit_setting = session.query(Setting).filter_by(key='slots_per_interval').first()
+        slots_limit = limit_setting.value if limit_setting else 1
+
         await state.update_data(
             contract_id=contract.id,
             client_fio=contract.client_fio,
             apt_num=contract.apt_num,
-            delivery_date=contract.delivery_date.isoformat()
+            delivery_date=contract.delivery_date.isoformat(),
+            slots_limit=slots_limit  # Кешируем лимит
         )
 
-        # Получаем лимит слотов
-        limit_setting = session.query(Setting).filter_by(key='slots_per_interval').first()
-        slots_limit = limit_setting.value if limit_setting else 1
-        
-        # Определяем период для проверки занятых дат (3 месяца вперёд)
+        # Определяем период для проверки занятых дат (90 дней вперёд)
         start_date = contract.delivery_date
         end_date = date.today() + timedelta(days=90)
         
@@ -151,6 +152,8 @@ async def calendar_navigation(callback: types.CallbackQuery, state: FSMContext):
     
     user_data = await state.get_data()
     delivery_date_str = user_data.get('delivery_date')
+    # Используем кешированный лимит из состояния
+    slots_limit = user_data.get('slots_limit', 1)
     
     if delivery_date_str:
         from datetime import datetime as dt
@@ -158,17 +161,14 @@ async def calendar_navigation(callback: types.CallbackQuery, state: FSMContext):
     else:
         delivery_date = None
     
+    # Определяем период только для выбранного месяца
+    import calendar as cal_module
+    first_day = date(year, month, 1)
+    last_day = date(year, month, cal_module.monthrange(year, month)[1])
+    
     with SessionLocal() as session:
-        # Получаем лимит слотов
-        limit_setting = session.query(Setting).filter_by(key='slots_per_interval').first()
-        slots_limit = limit_setting.value if limit_setting else 1
-        
-        # Определяем период для проверки
-        start_date = delivery_date if delivery_date else date.today()
-        end_date = date.today() + timedelta(days=90)
-        
-        # Получаем занятые даты
-        fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit)
+        # Запрашиваем занятые даты только для текущего месяца
+        fully_booked = get_fully_booked_dates(session, first_day, last_day, slots_limit)
     
     # Перерисовываем календарь с новым месяцем/годом
     new_calendar = generate_calendar(
@@ -191,6 +191,44 @@ async def date_full_handler(callback: types.CallbackQuery):
         "Пожалуйста, выберите другую дату.",
         show_alert=True
     )
+
+
+@router.callback_query(F.data == "back_to_calendar", ClientSteps.selecting_time)
+async def back_to_calendar(callback: types.CallbackQuery, state: FSMContext):
+    """Возврат к выбору даты из экрана выбора времени"""
+    user_data = await state.get_data()
+    delivery_date_str = user_data.get('delivery_date')
+    slots_limit = user_data.get('slots_limit', 1)
+    
+    if delivery_date_str:
+        from datetime import datetime as dt
+        delivery_date = dt.fromisoformat(delivery_date_str).date()
+    else:
+        delivery_date = None
+    
+    today = date.today()
+    
+    # Запрашиваем занятые даты на 90 дней вперёд (как при первоначальной загрузке)
+    start_date = delivery_date if delivery_date else today
+    end_date = today + timedelta(days=90)
+    
+    with SessionLocal() as session:
+        fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit)
+    
+    # Генерируем календарь
+    calendar_markup = generate_calendar(
+        min_date=delivery_date,
+        fully_booked_dates=fully_booked,
+        slots_limit=slots_limit
+    )
+    
+    await state.set_state(ClientSteps.selecting_date)
+    
+    await callback.message.edit_text(
+        "📅 Выберите дату для записи:",
+        reply_markup=calendar_markup
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("date_"), ClientSteps.selecting_date)

@@ -102,6 +102,10 @@ def generate_time_slots(date_str, booked_slots, limit):
             builder.button(text=f"✅ {display_text}", callback_data=f"time_{date_str}_{slot_str}")
 
     builder.adjust(1)
+    
+    # Кнопка "Назад" для возврата к выбору даты
+    builder.row(types.InlineKeyboardButton(text="⬅️ Назад к календарю", callback_data="back_to_calendar"))
+    
     return builder.as_markup()
 
 def generate_houses_kb(houses):
@@ -189,20 +193,20 @@ def generate_calendar(year: int = None, month: int = None, min_date: date = None
         builder.adjust(1, 7, 7, 7, 7, 7, 7)
 
     # Кнопки навигации (Назад / Вперед)
-    nav_buttons = []
     # Назад можно только если текущий вид позже, чем effective_min_date
     can_go_back = date(year, month, 1) > effective_min_date
+
+    next_month = month + 1 if month < 12 else 1
+    next_year = year if month < 12 else year + 1
+    next_button = types.InlineKeyboardButton(text=">>", callback_data=f"cal_{next_year}_{next_month}")
 
     if can_go_back:
         prev_month = month - 1 if month > 1 else 12
         prev_year = year if month > 1 else year - 1
-        nav_buttons.append(types.InlineKeyboardButton(text="<<", callback_data=f"cal_{prev_year}_{prev_month}"))
+        prev_button = types.InlineKeyboardButton(text="<<", callback_data=f"cal_{prev_year}_{prev_month}")
+        builder.row(prev_button, next_button)
     else:
-        nav_buttons.append(types.InlineKeyboardButton(text=" ", callback_data="ignore"))
+        # Только кнопка "Вперёд" на всю ширину
+        builder.row(next_button)
 
-    next_month = month + 1 if month < 12 else 1
-    next_year = year if month < 12 else year + 1
-    nav_buttons.append(types.InlineKeyboardButton(text=">>", callback_data=f"cal_{next_year}_{next_month}"))
-
-    builder.row(*nav_buttons)
     return builder.as_markup()
