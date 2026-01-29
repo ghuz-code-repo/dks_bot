@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  dks_bot:
+    build: .
+    container_name: dks_bot_app
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
