@@ -3,7 +3,7 @@ Unit тесты для функций генерации клавиатур и �
 """
 import pytest
 from datetime import date, datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import sys
 import os
 
@@ -15,7 +15,9 @@ from keyboards.inline import (
     get_min_booking_date,
     generate_time_slots,
     generate_houses_kb,
-    generate_calendar
+    generate_calendar,
+    get_fully_booked_dates,
+    SLOTS_PER_DAY
 )
 
 
@@ -351,11 +353,112 @@ class TestGenerateCalendar:
             
             for row in markup.inline_keyboard:
                 for btn in row:
-                    if btn.callback_data and btn.callback_data.startswith("date_"):
+                    if btn.callback_data and btn.callback_data.startswith("date_") and btn.callback_data != "date_full":
                         date_str = btn.callback_data.split("_")[1]
                         d = date.fromisoformat(date_str)
                         # Дата должна быть >= min_date
                         assert d >= min_date_val
+    
+    def test_fully_booked_dates_marked(self):
+        """Полностью занятые даты помечаются крестиком"""
+        fully_booked = {date(2026, 2, 16), date(2026, 2, 17)}
+        
+        with patch('keyboards.inline.get_min_booking_date') as mock_min_date:
+            mock_min_date.return_value = date(2026, 2, 10)
+            
+            markup = generate_calendar(
+                year=2026, 
+                month=2, 
+                fully_booked_dates=fully_booked
+            )
+            
+            found_booked = 0
+            for row in markup.inline_keyboard:
+                for btn in row:
+                    if btn.callback_data == "date_full":
+                        assert btn.text == "❌"
+                        found_booked += 1
+            
+            # Должны быть помечены 2 даты (16 и 17 февраля - пн и вт)
+            assert found_booked == 2
+    
+    def test_fully_booked_dates_not_selectable(self):
+        """Полностью занятые даты нельзя выбрать"""
+        fully_booked = {date(2026, 2, 16)}
+        
+        with patch('keyboards.inline.get_min_booking_date') as mock_min_date:
+            mock_min_date.return_value = date(2026, 2, 10)
+            
+            markup = generate_calendar(
+                year=2026, 
+                month=2, 
+                fully_booked_dates=fully_booked
+            )
+            
+            for row in markup.inline_keyboard:
+                for btn in row:
+                    # Убеждаемся, что date_2026-02-16 не существует
+                    assert btn.callback_data != "date_2026-02-16"
+
+
+class TestGetFullyBookedDates:
+    """Тесты для функции get_fully_booked_dates"""
+    
+    def test_returns_empty_set_when_no_bookings(self):
+        """Возвращает пустое множество когда нет бронирований"""
+        mock_session = MagicMock()
+        mock_session.query.return_value.filter.return_value.group_by.return_value.all.return_value = []
+        
+        result = get_fully_booked_dates(
+            mock_session,
+            date(2026, 2, 1),
+            date(2026, 2, 28),
+            slots_limit=2
+        )
+        
+        assert result == set()
+    
+    def test_returns_fully_booked_dates(self):
+        """Возвращает даты где все слоты заняты"""
+        mock_session = MagicMock()
+        
+        # 6 слотов * 2 лимит = 12 записей для полной занятости
+        mock_session.query.return_value.filter.return_value.group_by.return_value.all.return_value = [
+            (date(2026, 2, 16), 12),  # Полностью занят
+            (date(2026, 2, 17), 6),   # Частично занят
+        ]
+        
+        result = get_fully_booked_dates(
+            mock_session,
+            date(2026, 2, 1),
+            date(2026, 2, 28),
+            slots_limit=2
+        )
+        
+        assert date(2026, 2, 16) in result
+        assert date(2026, 2, 17) not in result
+    
+    def test_partial_booking_not_in_result(self):
+        """Частично занятые даты не включаются в результат"""
+        mock_session = MagicMock()
+        
+        # 6 слотов * 3 лимит = 18 записей для полной занятости
+        mock_session.query.return_value.filter.return_value.group_by.return_value.all.return_value = [
+            (date(2026, 2, 16), 17),  # Почти полностью (не хватает 1)
+            (date(2026, 2, 17), 18),  # Ровно полный
+            (date(2026, 2, 18), 20),  # Больше максимума
+        ]
+        
+        result = get_fully_booked_dates(
+            mock_session,
+            date(2026, 2, 1),
+            date(2026, 2, 28),
+            slots_limit=3
+        )
+        
+        assert date(2026, 2, 16) not in result  # 17 < 18
+        assert date(2026, 2, 17) in result      # 18 >= 18
+        assert date(2026, 2, 18) in result      # 20 >= 18
 
 
 if __name__ == "__main__":

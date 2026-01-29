@@ -277,6 +277,21 @@ class TestClientHandlers:
         assert "не найден" in call_text or "topilmadi" in call_text.lower()
     
     @pytest.mark.asyncio
+    async def test_date_full_handler(self):
+        """Обработчик нажатия на полностью занятую дату"""
+        from handlers.client import date_full_handler
+        
+        mock_callback = AsyncMock()
+        
+        await date_full_handler(mock_callback)
+        
+        mock_callback.answer.assert_called()
+        call_args = mock_callback.answer.call_args
+        assert call_args.kwargs.get('show_alert') is True
+        call_text = str(call_args).lower()
+        assert "слоты заняты" in call_text or "занят" in call_text
+    
+    @pytest.mark.asyncio
     @patch('handlers.client.SessionLocal')
     @patch('handlers.client.get_min_booking_date')
     async def test_date_before_min_date_rejected(self, mock_min_date, mock_session):

@@ -3,6 +3,10 @@ from datetime import time, datetime, timedelta, date
 import calendar
 from aiogram import types
 
+# Количество слотов в день
+TIME_SLOTS = ["09:00", "10:00", "11:00", "13:00", "14:00", "16:00"]
+SLOTS_PER_DAY = len(TIME_SLOTS)  # 6 слотов
+
 
 def get_next_working_day(from_date: date) -> date:
     """Возвращает следующий рабочий день после указанной даты"""
@@ -31,6 +35,43 @@ def get_min_booking_date() -> date:
     else:
         # После 12:00 — пропускаем один рабочий день
         return get_next_working_day(next_working)
+
+
+def get_fully_booked_dates(session, start_date: date, end_date: date, slots_limit: int) -> set:
+    """
+    Возвращает множество дат, где все слоты заняты.
+    
+    Args:
+        session: SQLAlchemy сессия
+        start_date: Начало периода
+        end_date: Конец периода  
+        slots_limit: Лимит записей на один слот
+    
+    Returns:
+        set[date]: Множество полностью занятых дат
+    """
+    from sqlalchemy import func
+    from database.models import Booking
+    
+    # Общее количество возможных записей в день = слоты * лимит на слот
+    max_bookings_per_day = SLOTS_PER_DAY * slots_limit
+    
+    # Считаем количество записей по датам
+    bookings_per_date = session.query(
+        Booking.date,
+        func.count(Booking.id).label('count')
+    ).filter(
+        Booking.date >= start_date,
+        Booking.date <= end_date
+    ).group_by(Booking.date).all()
+    
+    # Возвращаем даты где записей >= максимума
+    fully_booked = set()
+    for booking_date, count in bookings_per_date:
+        if count >= max_bookings_per_day:
+            fully_booked.add(booking_date)
+    
+    return fully_booked
 
 
 def generate_time_slots(date_str, booked_slots, limit):
@@ -72,7 +113,21 @@ def generate_houses_kb(houses):
     return builder.as_markup()
 
 
-def generate_calendar(year: int = None, month: int = None, min_date: date = None):
+def generate_calendar(year: int = None, month: int = None, min_date: date = None, 
+                      fully_booked_dates: set = None, slots_limit: int = 1):
+    """
+    Генерация календаря с учётом занятых дат.
+    
+    Args:
+        year: Год для отображения
+        month: Месяц для отображения  
+        min_date: Минимальная дата (дата сдачи объекта)
+        fully_booked_dates: Множество дат, где все слоты заняты
+        slots_limit: Лимит записей на слот (для справки)
+    """
+    if fully_booked_dates is None:
+        fully_booked_dates = set()
+        
     today = date.today()
     if year is None: year = today.year
     if month is None: month = today.month
@@ -119,11 +174,16 @@ def generate_calendar(year: int = None, month: int = None, min_date: date = None
                 # 1. Это рабочий день (пн-пт)
                 # 2. Дата >= минимальной даты записи (с учётом правила 12:00)
                 # 3. Дата >= даты сдачи объекта (если указана)
+                # 4. На эту дату есть свободные слоты
                 is_weekday = current_date.weekday() < 5
-                is_available = is_weekday and current_date >= effective_min_date
+                is_date_valid = is_weekday and current_date >= effective_min_date
+                is_fully_booked = current_date in fully_booked_dates
 
-                if is_available:
+                if is_date_valid and not is_fully_booked:
                     builder.button(text=str(day), callback_data=f"date_{current_date}")
+                elif is_date_valid and is_fully_booked:
+                    # Дата доступна, но все слоты заняты
+                    builder.button(text="❌", callback_data="date_full")
                 else:
                     builder.button(text="·", callback_data="ignore")  # Неактивный день
         builder.adjust(1, 7, 7, 7, 7, 7, 7)

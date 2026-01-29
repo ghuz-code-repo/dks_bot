@@ -9,7 +9,7 @@ from config import ADMIN_ID
 from database.models import Booking, Setting, Contract, Staff
 from database.session import SessionLocal
 from keyboards import inline
-from keyboards.inline import generate_time_slots, generate_calendar, get_min_booking_date
+from keyboards.inline import generate_time_slots, generate_calendar, get_min_booking_date, get_fully_booked_dates, SLOTS_PER_DAY
 from utils.states import ClientSteps
 
 router = Router()
@@ -111,8 +111,23 @@ async def contract_entered(message: types.Message, state: FSMContext):
             delivery_date=contract.delivery_date.isoformat()
         )
 
-        # Сначала создаем клавиатуру, затем отправляем сообщение
-        markup = generate_calendar(min_date=contract.delivery_date)
+        # Получаем лимит слотов
+        limit_setting = session.query(Setting).filter_by(key='slots_per_interval').first()
+        slots_limit = limit_setting.value if limit_setting else 1
+        
+        # Определяем период для проверки занятых дат (3 месяца вперёд)
+        start_date = contract.delivery_date
+        end_date = date.today() + timedelta(days=90)
+        
+        # Получаем полностью занятые даты
+        fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit)
+
+        # Создаем клавиатуру с учётом занятых дат
+        markup = generate_calendar(
+            min_date=contract.delivery_date,
+            fully_booked_dates=fully_booked,
+            slots_limit=slots_limit
+        )
         await state.set_state(ClientSteps.selecting_date)
 
         await message.answer(
@@ -143,11 +158,39 @@ async def calendar_navigation(callback: types.CallbackQuery, state: FSMContext):
     else:
         delivery_date = None
     
+    with SessionLocal() as session:
+        # Получаем лимит слотов
+        limit_setting = session.query(Setting).filter_by(key='slots_per_interval').first()
+        slots_limit = limit_setting.value if limit_setting else 1
+        
+        # Определяем период для проверки
+        start_date = delivery_date if delivery_date else date.today()
+        end_date = date.today() + timedelta(days=90)
+        
+        # Получаем занятые даты
+        fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit)
+    
     # Перерисовываем календарь с новым месяцем/годом
-    new_calendar = generate_calendar(year=year, month=month, min_date=delivery_date)
+    new_calendar = generate_calendar(
+        year=year, 
+        month=month, 
+        min_date=delivery_date,
+        fully_booked_dates=fully_booked,
+        slots_limit=slots_limit
+    )
     
     await callback.message.edit_reply_markup(reply_markup=new_calendar)
     await callback.answer()
+
+
+@router.callback_query(F.data == "date_full", ClientSteps.selecting_date)
+async def date_full_handler(callback: types.CallbackQuery):
+    """Обработчик нажатия на полностью занятую дату"""
+    await callback.answer(
+        "❌ На эту дату все слоты заняты.\n"
+        "Пожалуйста, выберите другую дату.",
+        show_alert=True
+    )
 
 
 @router.callback_query(F.data.startswith("date_"), ClientSteps.selecting_date)
