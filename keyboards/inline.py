@@ -1,7 +1,10 @@
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from datetime import time, datetime, timedelta, date
+from datetime import time, datetime, timedelta, date, timezone
 import calendar
 from aiogram import types
+
+# Часовой пояс Ташкента (UTC+5)
+TASHKENT_TZ = timezone(timedelta(hours=5))
 
 # Количество слотов в день
 TIME_SLOTS = ["09:00", "10:00", "11:00", "13:00", "14:00", "16:00"]
@@ -21,8 +24,11 @@ def get_min_booking_date() -> date:
     Рассчитывает минимальную дату для записи:
     - До 12:00 — следующий рабочий день
     - После 12:00 — через один рабочий день
+    
+    ВАЖНО: Используется время по Ташкенту (UTC+5)
     """
-    now = datetime.now()
+    # Получаем текущее время по Ташкенту (UTC+5)
+    now = datetime.now(TASHKENT_TZ)
     today = now.date()
     cutoff_hour = 12  # Граница — 12:00
     
