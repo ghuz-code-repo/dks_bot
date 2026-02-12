@@ -22,17 +22,33 @@ def get_next_working_day(from_date: date) -> date:
 def get_min_booking_date() -> date:
     """
     Рассчитывает минимальную дату для записи:
-    - До 12:00 — следующий рабочий день
-    - После 12:00 — через один рабочий день
+    - Суббота/воскресенье (любое время) — вторник
+    - Пятница (любое время) — понедельник
+    - Пн-Чт: до 12:00 — следующий рабочий день, после 12:00 — через один рабочий день
     
     ВАЖНО: Используется время по Ташкенту (UTC+5)
     """
     # Получаем текущее время по Ташкенту (UTC+5)
     now = datetime.now(TASHKENT_TZ)
     today = now.date()
+    current_weekday = today.weekday()  # 0=Пн, 4=Пт, 5=Сб, 6=Вс
     cutoff_hour = 12  # Граница — 12:00
     
-    # Находим следующий рабочий день
+    # Суббота или воскресенье - всегда вторник
+    if current_weekday >= 5:  # 5=Сб, 6=Вс
+        # Находим следующий понедельник
+        days_until_monday = (7 - current_weekday) % 7
+        if days_until_monday == 0:
+            days_until_monday = 1
+        next_monday = today + timedelta(days=days_until_monday)
+        # Вторник = понедельник + 1 день
+        return next_monday + timedelta(days=1)
+    
+    # Пятница - всегда понедельник
+    if current_weekday == 4:  # 4=Пт
+        return today + timedelta(days=3)  # Пт + 3 дня = Пн
+    
+    # Понедельник-четверг: стандартная логика
     next_working = get_next_working_day(today)
     
     if now.hour < cutoff_hour:
@@ -72,7 +88,8 @@ def get_fully_booked_dates(session, start_date: date, end_date: date, slots_limi
         .join(Contract, Booking.contract_id == Contract.id)
         .filter(
             Booking.date >= start_date,
-            Booking.date <= end_date
+            Booking.date <= end_date,
+            Booking.is_cancelled == False
         )
     )
     
@@ -91,7 +108,7 @@ def get_fully_booked_dates(session, start_date: date, end_date: date, slots_limi
     return fully_booked
 
 
-def generate_time_slots(date_str, booked_slots, limit):
+def generate_time_slots(date_str, booked_slots, limit, lang='ru'):
     builder = InlineKeyboardBuilder()
 
     # Преобразуем выбранную пользователем дату из строки в объект date
@@ -121,7 +138,11 @@ def generate_time_slots(date_str, booked_slots, limit):
     builder.adjust(1)
     
     # Кнопка "Назад" для возврата к выбору даты
-    builder.row(types.InlineKeyboardButton(text="⬅️ Назад к календарю", callback_data="back_to_calendar"))
+    back_button_text = {
+        'ru': '⬅️ Назад к календарю',
+        'uz': '⬅️ Taqvimga qaytish'
+    }
+    builder.row(types.InlineKeyboardButton(text=back_button_text[lang], callback_data="back_to_calendar"))
     
     return builder.as_markup()
 
@@ -135,7 +156,7 @@ def generate_houses_kb(houses):
 
 
 def generate_calendar(year: int = None, month: int = None, min_date: date = None, 
-                      fully_booked_dates: set = None, slots_limit: int = 1):
+                      fully_booked_dates: set = None, slots_limit: int = 1, lang: str = 'ru'):
     """
     Генерация календаря с учётом занятых дат.
     
@@ -145,6 +166,7 @@ def generate_calendar(year: int = None, month: int = None, min_date: date = None
         min_date: Минимальная дата (дата сдачи объекта)
         fully_booked_dates: Множество дат, где все слоты заняты
         slots_limit: Лимит записей на слот (для справки)
+        lang: Язык интерфейса ('ru' или 'uz')
     """
     if fully_booked_dates is None:
         fully_booked_dates = set()
@@ -171,15 +193,28 @@ def generate_calendar(year: int = None, month: int = None, min_date: date = None
     builder = InlineKeyboardBuilder()
 
     # Заголовок: Месяц и Год
-    month_names = [
-        "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-        "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
-    ]
-    builder.button(text=f"{month_names[month - 1]} {year}", callback_data="ignore")
+    month_names = {
+        'ru': [
+            "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+            "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+        ],
+        'uz': [
+            "Yanvar", "Fevral", "Mart", "Aprel", "May", "Iyun",
+            "Iyul", "Avgust", "Sentabr", "Oktabr", "Noyabr", "Dekabr"
+        ]
+    }
+    
+    # Дни недели
+    weekdays = {
+        'ru': ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"],
+        'uz': ["Du", "Se", "Ch", "Pa", "Ju", "Sh", "Ya"]
+    }
+    
+    builder.button(text=f"{month_names[lang][month - 1]} {year}", callback_data="ignore")
     builder.adjust(1)
 
     # Дни недели
-    for day in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]:
+    for day in weekdays[lang]:
         builder.button(text=day, callback_data="ignore")
     builder.adjust(1, 7)
 

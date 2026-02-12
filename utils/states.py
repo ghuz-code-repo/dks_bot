@@ -1,11 +1,16 @@
 from aiogram.fsm.state import StatesGroup, State
 
 class ClientSteps(StatesGroup):
+    # Основной флоу добавления записи
     selecting_house = State()
     entering_contract = State()
     selecting_date = State()
     selecting_time = State()
     entering_phone = State()
+    
+    # Флоу отмены записи
+    cancel_selecting_booking = State()
+    cancel_confirming = State()
 
 
 class AdminSteps(StatesGroup):
@@ -18,3 +23,24 @@ class AdminSteps(StatesGroup):
     # Управление слотами
     selecting_project_for_slots = State()
     waiting_for_slot_limit = State()
+    
+    # Управление адресами проектов
+    selecting_project_for_address = State()
+    waiting_for_address_ru = State()
+    waiting_for_address_uz = State()
+    
+    # Добавление нового проекта
+    add_project_address_ru = State()
+    add_project_address_uz = State()
+    add_project_slots_limit = State()
+    add_project_latitude = State()
+    add_project_longitude = State()
+    add_project_excel = State()
+    
+    # Редактирование настроек проекта
+    edit_project_select = State()
+    edit_project_action = State()
+    edit_project_address_ru = State()
+    edit_project_address_uz = State()
+    edit_project_latitude = State()
+    edit_project_longitude = State()

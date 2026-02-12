@@ -45,42 +45,57 @@ async def hide_menu(message: types.Message):
 @router.message(F.text == "📊 Выгрузить отчет")
 async def export_report_employee(message: types.Message):
     """Выгрузить отчет (для сотрудников)"""
-    with SessionLocal() as session:
-        query = (
-            select(
-                Booking.date.label("Дата визита"),
-                Booking.time_slot.label("Время"),
-                Contract.client_fio.label("ФИО Клиента"),
-                Booking.client_phone.label("Телефон клиента"),
-                Contract.contract_num.label("Договор"),
-                Contract.house_name.label("Дом"),
-                Contract.entrance.label("Подъезд"),
-                Contract.apt_num.label("Кв")
+    # Отправляем сообщение о выполнении операции
+    loading_msg = await message.answer("⏳ Ваша операция выполняется, подождите...")
+    
+    try:
+        with SessionLocal() as session:
+            query = (
+                select(
+                    Booking.date.label("Дата визита"),
+                    Booking.time_slot.label("Время"),
+                    Contract.client_fio.label("ФИО Клиента"),
+                    Booking.client_phone.label("Телефон клиента"),
+                    Contract.contract_num.label("Договор"),
+                    Contract.house_name.label("Дом"),
+                    Contract.entrance.label("Подъезд"),
+                    Contract.apt_num.label("Кв")
+                )
+                .join(Contract, Booking.contract_id == Contract.id)
+                .filter(Booking.is_cancelled == False)
+                .order_by(Booking.date.desc(), Booking.time_slot.desc())
             )
-            .join(Contract, Booking.contract_id == Contract.id)
-            .order_by(Booking.date.desc(), Booking.time_slot.desc())
+
+            results = session.execute(query).all()
+
+            if not results:
+                await loading_msg.delete()
+                return await message.answer("Записи в базе данных отсутствуют.", reply_markup=get_employee_keyboard())
+
+            df = pd.DataFrame(results, columns=[
+                "Дата визита", "Время", "ФИО Клиента", "Телефон клиента",
+                "Договор", "Дом", "Подъезд", "Кв"
+            ])
+
+            df['Время'] = df['Время'].apply(lambda x: x.strftime('%H:%M') if x else "")
+
+            report_path = "data/bookings_report.xlsx"
+            df.to_excel(report_path, index=False)
+
+        # Удаляем сообщение о загрузке
+        await loading_msg.delete()
+        
+        await message.answer_document(
+            FSInputFile(report_path),
+            caption=f"Отчет о записях на {datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
-
-        results = session.execute(query).all()
-
-        if not results:
-            return await message.answer("Записи в базе данных отсутствуют.", reply_markup=get_employee_keyboard())
-
-        df = pd.DataFrame(results, columns=[
-            "Дата визита", "Время", "ФИО Клиента", "Телефон клиента",
-            "Договор", "Дом", "Подъезд", "Кв"
-        ])
-
-        df['Время'] = df['Время'].apply(lambda x: x.strftime('%H:%M') if x else "")
-
-        report_path = "data/bookings_report.xlsx"
-        df.to_excel(report_path, index=False)
-
-    await message.answer_document(
-        FSInputFile(report_path),
-        caption=f"Отчет о записях на {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-    )
-    os.remove(report_path)
+        os.remove(report_path)
+    except Exception as e:
+        try:
+            await loading_msg.delete()
+        except:
+            pass
+        await message.answer(f"❌ Ошибка при формировании отчета: {e}", reply_markup=get_employee_keyboard())
 
 
 @router.message(F.text == "📋 Список записей")
@@ -93,7 +108,11 @@ async def show_bookings_list_employee(message: types.Message):
         bookings = (
             session.query(Booking, Contract)
             .join(Contract, Booking.contract_id == Contract.id)
-            .filter(Booking.date >= today, Booking.date <= week_later)
+            .filter(
+                Booking.date >= today, 
+                Booking.date <= week_later,
+                Booking.is_cancelled == False
+            )
             .order_by(Booking.date, Booking.time_slot)
             .all()
         )

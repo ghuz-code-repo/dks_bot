@@ -167,13 +167,16 @@ class TestGenerateTimeSlots:
         markup = generate_time_slots(date_str, booked_slots, limit)
         buttons = markup.inline_keyboard
         
-        # Должно быть 6 слотов
-        assert len(buttons) == 6
+        # Должно быть 6 слотов + 1 кнопка "назад"
+        assert len(buttons) == 7
         
-        # Все слоты должны быть доступны (с ✅)
-        for row in buttons:
+        # Первые 6 слотов должны быть доступны (с ✅)
+        for row in buttons[:6]:
             assert "✅" in row[0].text
             assert row[0].callback_data.startswith("time_")
+        
+        # Последняя кнопка - "Назад"
+        assert "Назад" in buttons[6][0].text or "back" in buttons[6][0].callback_data
     
     def test_some_slots_full(self):
         """Некоторые слоты заняты"""
@@ -218,9 +221,13 @@ class TestGenerateTimeSlots:
         markup = generate_time_slots(date_str, booked_slots, limit)
         buttons = markup.inline_keyboard
         
-        for row in buttons:
+        # Первые 6 рядов - слоты времени
+        for row in buttons[:6]:
             assert "❌" in row[0].text
             assert row[0].callback_data == "full"
+        
+        # Последняя кнопка - "Назад"
+        assert "Назад" in buttons[6][0].text or "back" in buttons[6][0].callback_data
     
     def test_correct_time_format_in_buttons(self):
         """Правильный формат времени в кнопках"""
@@ -407,7 +414,12 @@ class TestGetFullyBookedDates:
     def test_returns_empty_set_when_no_bookings(self):
         """Возвращает пустое множество когда нет бронирований"""
         mock_session = MagicMock()
-        mock_session.query.return_value.filter.return_value.group_by.return_value.all.return_value = []
+        mock_query = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_query.join.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.group_by.return_value = mock_query
+        mock_query.all.return_value = []
         
         result = get_fully_booked_dates(
             mock_session,
@@ -421,9 +433,14 @@ class TestGetFullyBookedDates:
     def test_returns_fully_booked_dates(self):
         """Возвращает даты где все слоты заняты"""
         mock_session = MagicMock()
+        mock_query = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_query.join.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.group_by.return_value = mock_query
         
         # 6 слотов * 2 лимит = 12 записей для полной занятости
-        mock_session.query.return_value.filter.return_value.group_by.return_value.all.return_value = [
+        mock_query.all.return_value = [
             (date(2026, 2, 16), 12),  # Полностью занят
             (date(2026, 2, 17), 6),   # Частично занят
         ]
@@ -441,9 +458,14 @@ class TestGetFullyBookedDates:
     def test_partial_booking_not_in_result(self):
         """Частично занятые даты не включаются в результат"""
         mock_session = MagicMock()
+        mock_query = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_query.join.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.group_by.return_value = mock_query
         
         # 6 слотов * 3 лимит = 18 записей для полной занятости
-        mock_session.query.return_value.filter.return_value.group_by.return_value.all.return_value = [
+        mock_query.all.return_value = [
             (date(2026, 2, 16), 17),  # Почти полностью (не хватает 1)
             (date(2026, 2, 17), 18),  # Ровно полный
             (date(2026, 2, 18), 20),  # Больше максимума

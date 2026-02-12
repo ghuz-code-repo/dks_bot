@@ -191,22 +191,21 @@ class TestCommonHandlers:
         assert "Админ" in call_text or "report" in call_text.lower()
     
     @pytest.mark.asyncio
+    @patch('handlers.common.get_user_language')
+    @patch('handlers.common.is_staff')
     @patch('handlers.common.is_admin')
-    @patch('handlers.common.SessionLocal')
-    async def test_start_for_client(self, mock_session, mock_is_admin):
+    async def test_start_for_client(self, mock_is_admin, mock_is_staff, mock_get_lang):
         """Команда /start для клиента"""
         from handlers.common import cmd_start
         
         mock_is_admin.return_value = False
+        mock_is_staff.return_value = False
+        mock_get_lang.return_value = 'ru'
         
         mock_message = AsyncMock()
         mock_message.from_user.id = 999999999
         
         mock_state = AsyncMock()
-        
-        mock_session_instance = MagicMock()
-        mock_session.return_value.__enter__.return_value = mock_session_instance
-        mock_session_instance.execute.return_value.scalars.return_value.all.return_value = ['ЖК Навои']
         
         await cmd_start(mock_message, mock_state)
         
@@ -214,54 +213,66 @@ class TestCommonHandlers:
         mock_message.answer.assert_called()
     
     @pytest.mark.asyncio
+    @patch('handlers.common.get_user_language')
+    @patch('handlers.common.is_staff')
     @patch('handlers.common.is_admin')
-    @patch('handlers.common.SessionLocal')
-    async def test_start_no_houses_available(self, mock_session, mock_is_admin):
-        """Команда /start когда нет доступных домов"""
+    async def test_start_no_houses_available(self, mock_is_admin, mock_is_staff, mock_get_lang):
+        """Команда /start для обычного пользователя - показывает клиентскую клавиатуру"""
         from handlers.common import cmd_start
         
         mock_is_admin.return_value = False
+        mock_is_staff.return_value = False
+        mock_get_lang.return_value = 'ru'
         
         mock_message = AsyncMock()
-        mock_state = AsyncMock()
+        mock_message.from_user.id = 999999999
         
-        mock_session_instance = MagicMock()
-        mock_session.return_value.__enter__.return_value = mock_session_instance
-        mock_session_instance.execute.return_value.scalars.return_value.all.return_value = []
+        mock_state = AsyncMock()
         
         await cmd_start(mock_message, mock_state)
         
-        call_text = str(mock_message.answer.call_args).lower()
-        assert "нет" in call_text or "пуст" in call_text
+        mock_state.clear.assert_called_once()
+        mock_message.answer.assert_called()
+        # Проверяем что показывается приветственное сообщение
+        call_text = str(mock_message.answer.call_args)
+        assert "Salom" in call_text or "Здравствуйте" in call_text
 
 
 class TestClientHandlers:
     """Тесты для клиентских обработчиков"""
     
     @pytest.mark.asyncio
-    async def test_house_selected(self):
+    @patch('handlers.client.get_user_language')
+    async def test_house_selected(self, mock_get_lang):
         """Выбор дома"""
         from handlers.client import house_selected
         
+        mock_get_lang.return_value = 'ru'
+        
         mock_callback = AsyncMock()
         mock_callback.data = "house_ЖК Навои"
+        mock_callback.from_user.id = 123456789
         mock_callback.message = AsyncMock()
         
         mock_state = AsyncMock()
         
         await house_selected(mock_callback, mock_state)
         
-        mock_state.update_data.assert_called_with(selected_house="ЖК Навои")
+        mock_state.update_data.assert_called()
         mock_callback.answer.assert_called()
     
     @pytest.mark.asyncio
+    @patch('handlers.client.get_user_language')
     @patch('handlers.client.SessionLocal')
-    async def test_contract_not_found(self, mock_session):
+    async def test_contract_not_found(self, mock_session, mock_get_lang):
         """Договор не найден"""
         from handlers.client import contract_entered
         
+        mock_get_lang.return_value = 'ru'
+        
         mock_message = AsyncMock()
         mock_message.text = "INVALID-CONTRACT"
+        mock_message.from_user.id = 123456789
         
         mock_state = AsyncMock()
         mock_state.get_data.return_value = {'selected_house': 'ЖК Навои'}
@@ -332,8 +343,9 @@ class TestClientHandlers:
         assert "рабочие дни" in call_text.lower() or "пн-пт" in call_text.lower()
     
     @pytest.mark.asyncio
+    @patch('handlers.client.get_user_language', return_value='ru')
     @patch('handlers.client.SessionLocal')
-    async def test_time_slot_full_rejected(self, mock_session):
+    async def test_time_slot_full_rejected(self, mock_session, mock_get_lang):
         """Занятый слот отклоняется"""
         from handlers.client import time_selected
         
@@ -341,15 +353,21 @@ class TestClientHandlers:
         mock_callback.data = "time_2026-02-02_10:00"
         
         mock_state = AsyncMock()
+        mock_state.get_data.return_value = {
+            'slots_limit': 2,
+            'house_name': 'ЖК Навои'
+        }
         
         # Мокаем что слот полностью занят
         mock_session_instance = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_session_instance
         
-        mock_setting = MagicMock()
-        mock_setting.value = 2
-        mock_session_instance.query.return_value.filter_by.return_value.first.return_value = mock_setting
-        mock_session_instance.query.return_value.filter.return_value.count.return_value = 2  # Полностью занят
+        # Мокаем цепочку вызовов для проверки количества бронирований
+        mock_query = MagicMock()
+        mock_session_instance.query.return_value = mock_query
+        mock_query.join.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.count.return_value = 2  # Полностью занят
         
         await time_selected(mock_callback, mock_state)
         

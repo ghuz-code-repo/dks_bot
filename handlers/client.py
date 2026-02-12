@@ -1,26 +1,63 @@
 import logging
 import re
+import asyncio
 from datetime import datetime, timedelta, date
 
 from aiogram import Router, F, types, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.types import ReplyKeyboardRemove
-from sqlalchemy import select, func
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy import select, func, or_
 
-from config import ADMIN_ID
+from config import ADMIN_ID, DKS_CONTACTS
 from database.models import Booking, Setting, Contract, Staff, ProjectSlots
 from database.session import SessionLocal
 from keyboards import inline
 from keyboards.inline import generate_time_slots, generate_calendar, get_min_booking_date, get_fully_booked_dates, SLOTS_PER_DAY
-from keyboards.reply import get_phone_request_keyboard
+from keyboards.reply import get_phone_request_keyboard, get_client_keyboard, BUTTON_TEXTS
 from utils.states import ClientSteps
+from utils.language import get_user_language, toggle_language, get_message, get_user_phone, set_user_phone
 
 router = Router()
 
-OFFICE_ADDRESS = "г. Ташкент, Яшнабадский район, ул. Фаргона йули 27 (O'Z Zamin)"
+# Адреса по умолчанию (используются только для раздела "Контакты")
+DEFAULT_ADDRESS_RU = "г. Ташкент, Яшнабадский район, ул. Фаргона йули 27 (O'Z Zamin)"
+DEFAULT_ADDRESS_UZ = "Toshkent sh., Yashnobod tumani, Farg'ona yo'li ko'chasi 27 (O'Z Zamin)"
 OFFICE_LAT = 41.281067
 OFFICE_LON = 69.306903
 OFFICE_PHONE = "+998781485115"
+
+
+def get_project_address(project_name: str, lang: str = 'ru') -> str | None:
+    """Получить адрес проекта из базы. Возвращает None если не установлен."""
+    with SessionLocal() as session:
+        project_slot = session.query(ProjectSlots).filter_by(project_name=project_name).first()
+        if project_slot:
+            if lang == 'uz' and project_slot.address_uz:
+                return project_slot.address_uz
+            elif project_slot.address_ru:
+                return project_slot.address_ru
+    return None
+
+
+def get_project_coordinates(project_name: str) -> tuple[float, float] | None:
+    """
+    Получить координаты проекта из базы.
+    
+    Args:
+        project_name: Название проекта
+    
+    Returns:
+        tuple: (широта, долгота) или None если координаты не установлены
+    """
+    with SessionLocal() as session:
+        project_slot = session.query(ProjectSlots).filter_by(project_name=project_name).first()
+        if project_slot and project_slot.latitude and project_slot.longitude:
+            try:
+                return float(project_slot.latitude), float(project_slot.longitude)
+            except (ValueError, TypeError):
+                return None
+    return None
 
 
 def validate_phone_number(phone: str) -> tuple[bool, str]:
@@ -57,24 +94,470 @@ def validate_phone_number(phone: str) -> tuple[bool, str]:
 def get_project_slot_limit(session, project_name: str) -> int:
     """
     Получить лимит слотов для конкретного проекта.
-    Если лимит не установлен для проекта, используется глобальный лимит.
     
     Args:
         session: SQLAlchemy сессия
         project_name: Название проекта (house_name)
     
     Returns:
-        int: Лимит записей на один слот
+        int: Лимит записей на один слот (default 1 если проект не найден)
     """
     # Проверяем индивидуальный лимит для проекта
     project_slot = session.query(ProjectSlots).filter_by(project_name=project_name).first()
     if project_slot:
         return project_slot.slots_limit
     
-    # Если нет индивидуального - используем глобальный
-    global_setting = session.query(Setting).filter_by(key='slots_per_interval').first()
-    return global_setting.value if global_setting else 1
+    # Если проекта нет в ProjectSlots, возвращаем default=1
+    # (для обратной совместимости со старыми проектами)
+    return 1
 
+
+def get_min_cancellation_date() -> date:
+    """
+    Рассчитывает минимальную дату для отмены записи (аналогично записи):
+    - До 12:00 — следующий рабочий день
+    - После 12:00 — через один рабочий день
+    """
+    return get_min_booking_date()
+
+
+def can_cancel_booking(booking_date: date) -> bool:
+    """Проверяет, можно ли отменить запись на указанную дату"""
+    min_date = get_min_cancellation_date()
+    return booking_date >= min_date
+
+
+# ========== КНОПКИ КЛИЕНТСКОЙ КЛАВИАТУРЫ ==========
+
+@router.message(F.text.in_([BUTTON_TEXTS['add_booking']['ru'], BUTTON_TEXTS['add_booking']['uz']]))
+async def add_booking_button(message: types.Message, state: FSMContext):
+    """Начало процесса добавления записи"""
+    await state.clear()
+    user_id = message.from_user.id
+    lang = get_user_language(user_id)
+    
+    with SessionLocal() as session:
+        houses = session.execute(select(Contract.house_name).distinct()).scalars().all()
+        houses = [h for h in houses if h]
+
+    if not houses:
+        await message.answer(
+            get_message('no_houses_available', lang),
+            reply_markup=get_client_keyboard(lang)
+        )
+        return
+
+    await state.set_state(ClientSteps.selecting_house)
+    await message.answer(
+        get_message('select_house', lang),
+        reply_markup=inline.generate_houses_kb(houses)
+    )
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['cancel_booking']['ru'], BUTTON_TEXTS['cancel_booking']['uz']]))
+async def cancel_booking_button(message: types.Message, state: FSMContext):
+    """Начало процесса отмены записи"""
+    await state.clear()
+    user_id = message.from_user.id
+    lang = get_user_language(user_id)
+    
+    with SessionLocal() as session:
+        # Получаем активные записи пользователя (по user_telegram_id или contract.telegram_id)
+        today = date.today()
+        bookings = (
+            session.query(Booking, Contract)
+            .join(Contract, Booking.contract_id == Contract.id)
+            .filter(
+                or_(
+                    Booking.user_telegram_id == user_id,
+                    Contract.telegram_id == user_id
+                ),
+                Booking.date >= today,
+                Booking.is_cancelled == False
+            )
+            .order_by(Booking.date, Booking.time_slot)
+            .all()
+        )
+        
+        if not bookings:
+            await message.answer(
+                get_message('no_bookings_to_cancel', lang),
+                reply_markup=get_client_keyboard(lang)
+            )
+            return
+        
+        # Формируем текст со списком записей и кнопки
+        builder = InlineKeyboardBuilder()
+        cancellable_found = False
+        
+        if lang == 'uz':
+            text_lines = ["📋 **Sizning yozuvlaringiz:**\n"]
+        else:
+            text_lines = ["📋 **Ваши записи:**\n"]
+        
+        for idx, (booking, contract) in enumerate(bookings, 1):
+            can_cancel = can_cancel_booking(booking.date)
+            date_str = booking.date.strftime('%d.%m.%Y')
+            time_str = booking.time_slot.strftime('%H:%M')
+            
+            if can_cancel:
+                cancellable_found = True
+                text_lines.append(f"**{idx}.** 📅 {date_str} ⏰ {time_str}")
+                text_lines.append(f"    🏠 {contract.house_name}, кв. {contract.apt_num}\n")
+                builder.button(
+                    text=f"❌ Отменить #{idx}" if lang == 'ru' else f"❌ Bekor qilish #{idx}",
+                    callback_data=f"cancel_{booking.id}"
+                )
+            else:
+                text_lines.append(f"**{idx}.** 🔒 {date_str} ⏰ {time_str}")
+                text_lines.append(f"    🏠 {contract.house_name}, кв. {contract.apt_num}")
+                if lang == 'uz':
+                    text_lines.append(f"    _(bekor qilib bo'lmaydi)_\n")
+                else:
+                    text_lines.append(f"    _(отмена недоступна)_\n")
+        
+        builder.button(text=get_message('back', lang), callback_data="cancel_back")
+        builder.adjust(1)
+        
+        text = "\n".join(text_lines)
+        if not cancellable_found:
+            text += "\n" + get_message('all_bookings_blocked', lang)
+        else:
+            if lang == 'uz':
+                text += "\nBekor qilish uchun tugmani bosing:"
+            else:
+                text += "\nНажмите кнопку для отмены:"
+        
+        await state.set_state(ClientSteps.cancel_selecting_booking)
+        await message.answer(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['my_bookings']['ru'], BUTTON_TEXTS['my_bookings']['uz']]))
+async def my_bookings_button(message: types.Message, state: FSMContext):
+    """Показать все записи пользователя"""
+    await state.clear()
+    user_id = message.from_user.id
+    lang = get_user_language(user_id)
+    
+    with SessionLocal() as session:
+        today = date.today()
+        # Ищем записи пользователя по user_telegram_id ИЛИ по contract.telegram_id (для старых записей)
+        bookings = (
+            session.query(Booking, Contract)
+            .join(Contract, Booking.contract_id == Contract.id)
+            .filter(
+                or_(
+                    Booking.user_telegram_id == user_id,
+                    Contract.telegram_id == user_id
+                ),
+                Booking.date >= today,
+                Booking.is_cancelled == False
+            )
+            .order_by(Booking.date, Booking.time_slot)
+            .all()
+        )
+        
+        if not bookings:
+            await message.answer(
+                get_message('no_bookings', lang),
+                reply_markup=get_client_keyboard(lang)
+            )
+            return
+        
+        text = get_message('my_bookings_header', lang) + "\n\n"
+        
+        for booking, contract in bookings:
+            date_str = booking.date.strftime('%d.%m.%Y')
+            time_str = booking.time_slot.strftime('%H:%M')
+            text += get_message('booking_item', lang, 
+                               date=date_str, 
+                               time=time_str, 
+                               house=contract.house_name, 
+                               apt=contract.apt_num) + "\n"
+        
+        await message.answer(text, parse_mode="Markdown", reply_markup=get_client_keyboard(lang))
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['contacts']['ru'], BUTTON_TEXTS['contacts']['uz']]))
+async def contacts_button(message: types.Message, state: FSMContext):
+    """Показать контакты отдела ДКС"""
+    await state.clear()
+    user_id = message.from_user.id
+    lang = get_user_language(user_id)
+    
+    if lang == 'ru':
+        address = DKS_CONTACTS['address_ru']
+        hours = DKS_CONTACTS['working_hours_ru']
+    else:
+        address = DKS_CONTACTS['address_uz']
+        hours = DKS_CONTACTS['working_hours_uz']
+    
+    text = get_message('contacts', lang, 
+                      phone=DKS_CONTACTS['phone'],
+                      address=address,
+                      hours=hours)
+    
+    await message.answer(text, parse_mode="Markdown", reply_markup=get_client_keyboard(lang))
+    
+    # Отправляем геолокацию офиса (для раздела "Контакты")
+    await message.bot.send_location(
+        chat_id=message.from_user.id,
+        latitude=OFFICE_LAT,
+        longitude=OFFICE_LON
+    )
+
+
+# ========== ПЕРЕКЛЮЧЕНИЕ ЯЗЫКА ==========
+
+@router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]), ClientSteps.entering_phone)
+async def language_toggle_during_phone(message: types.Message, state: FSMContext):
+    """Переключение языка во время ввода телефона (без потери прогресса)"""
+    user_id = message.from_user.id
+    new_lang = toggle_language(user_id)
+    
+    await message.answer(
+        get_message('language_changed', new_lang),
+        reply_markup=get_phone_request_keyboard(new_lang)
+    )
+    
+    # Проверяем, есть ли сохранённый телефон
+    saved_phone = get_user_phone(user_id)
+    
+    if saved_phone:
+        # Показываем выбор: использовать сохранённый или ввести новый
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text=get_message('use_saved_phone', new_lang, phone=saved_phone),
+            callback_data=f"use_phone_{saved_phone}"
+        )
+        builder.button(
+            text=get_message('enter_new_phone', new_lang),
+            callback_data="new_phone"
+        )
+        builder.adjust(1)
+        
+        await message.answer(
+            get_message('phone_choice', new_lang),
+            reply_markup=builder.as_markup()
+        )
+    else:
+        await message.answer(
+            get_message('enter_phone', new_lang),
+            reply_markup=get_phone_request_keyboard(new_lang)
+        )
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]), ClientSteps.entering_contract)
+async def language_toggle_during_contract(message: types.Message, state: FSMContext):
+    """Переключение языка во время ввода договора (без потери прогресса)"""
+    user_id = message.from_user.id
+    new_lang = toggle_language(user_id)
+    data = await state.get_data()
+    house_name = data.get('selected_house', '')
+    
+    await message.answer(
+        get_message('language_changed', new_lang)
+    )
+    await message.answer(
+        get_message('enter_contract', new_lang)
+    )
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]), ClientSteps.selecting_date)
+async def language_toggle_during_date_selection(message: types.Message, state: FSMContext):
+    """Переключение языка во время выбора даты (обновляет календарь)"""
+    user_id = message.from_user.id
+    new_lang = toggle_language(user_id)
+    
+    # Получаем данные из состояния
+    data = await state.get_data()
+    delivery_date_str = data.get('delivery_date')
+    slots_limit = data.get('slots_limit', 1)
+    contract_id = data.get('contract_id')
+    client_fio = data.get('client_fio')
+    house_name = data.get('house_name')
+    
+    if not delivery_date_str or not contract_id:
+        # Если данных нет, просто меняем язык и возвращаем на главную
+        await state.clear()
+        await message.answer(
+            get_message('language_changed', new_lang),
+            reply_markup=get_client_keyboard(new_lang)
+        )
+        return
+    
+    # Пересоздаём календарь с новым языком
+    from datetime import datetime as dt
+    min_booking_date = dt.fromisoformat(delivery_date_str).date()
+    today = date.today()
+    
+    with SessionLocal() as session:
+        # Определяем период для проверки занятых дат
+        start_date = min_booking_date
+        end_date = today + timedelta(days=90)
+        
+        # Получаем полностью занятые даты для проекта
+        fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit, house_name)
+    
+    # Создаем новый календарь
+    markup = generate_calendar(
+        min_date=min_booking_date,
+        fully_booked_dates=fully_booked,
+        slots_limit=slots_limit,
+        lang=new_lang
+    )
+    
+    # Отправляем уведомление о смене языка
+    await message.answer(
+        get_message('language_changed', new_lang)
+    )
+    
+    # Отправляем календарь с переведённым текстом
+    await message.answer(
+        get_message('contract_confirmed', new_lang,
+                   fio=client_fio,
+                   date=min_booking_date.strftime('%d.%m.%Y')),
+        reply_markup=markup
+    )
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]))
+async def language_toggle_button(message: types.Message, state: FSMContext):
+    """Переключение языка интерфейса"""
+    await state.clear()
+    user_id = message.from_user.id
+    new_lang = toggle_language(user_id)
+    
+    await message.answer(
+        get_message('language_changed', new_lang),
+        reply_markup=get_client_keyboard(new_lang)
+    )
+
+
+# ========== ОБРАБОТЧИКИ ОТМЕНЫ ЗАПИСИ ==========
+
+@router.callback_query(F.data == "cancel_back", ClientSteps.cancel_selecting_booking)
+async def cancel_back_handler(callback: types.CallbackQuery, state: FSMContext):
+    """Возврат в главное меню из отмены"""
+    user_id = callback.from_user.id
+    lang = get_user_language(user_id)
+    await state.clear()
+    await callback.message.edit_text(get_message('cancel_aborted', lang))
+    await callback.message.answer(
+        get_message('welcome', lang),
+        reply_markup=get_client_keyboard(lang)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cancel_blocked", ClientSteps.cancel_selecting_booking)
+async def cancel_blocked_handler(callback: types.CallbackQuery):
+    """Обработчик при нажатии на заблокированную для отмены запись"""
+    user_id = callback.from_user.id
+    lang = get_user_language(user_id)
+    await callback.answer(
+        get_message('all_bookings_blocked', lang)[:200],  # Telegram limit
+        show_alert=True
+    )
+
+
+@router.callback_query(F.data.startswith("cancel_"), ClientSteps.cancel_selecting_booking)
+async def cancel_booking_selected(callback: types.CallbackQuery, state: FSMContext):
+    """Подтверждение отмены записи"""
+    booking_id = int(callback.data.split("_")[1])
+    user_id = callback.from_user.id
+    lang = get_user_language(user_id)
+    
+    with SessionLocal() as session:
+        booking = session.query(Booking).filter(Booking.id == booking_id).first()
+        if not booking:
+            await callback.answer("Запись не найдена", show_alert=True)
+            return
+        
+        contract = session.query(Contract).filter(Contract.id == booking.contract_id).first()
+        
+        date_str = booking.date.strftime('%d.%m.%Y')
+        time_str = booking.time_slot.strftime('%H:%M')
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text=get_message('confirm', lang), callback_data=f"confirm_cancel_{booking_id}")
+        builder.button(text=get_message('reject', lang), callback_data="cancel_back")
+        builder.adjust(1)
+        
+        await state.set_state(ClientSteps.cancel_confirming)
+        await callback.message.edit_text(
+            get_message('confirm_cancel', lang, date=date_str, time=time_str),
+            reply_markup=builder.as_markup()
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("confirm_cancel_"), ClientSteps.cancel_confirming)
+async def confirm_cancel_booking(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    """Подтверждение отмены записи"""
+    booking_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+    lang = get_user_language(user_id)
+    
+    with SessionLocal() as session:
+        booking = session.query(Booking).filter(Booking.id == booking_id).first()
+        if not booking:
+            await callback.answer("Запись не найдена", show_alert=True)
+            return
+        
+        # Проверяем возможность отмены ещё раз
+        if not can_cancel_booking(booking.date):
+            await callback.answer(
+                "⚠️ Отмена невозможна - прошёл срок отмены",
+                show_alert=True
+            )
+            return
+        
+        contract = session.query(Contract).filter(Contract.id == booking.contract_id).first()
+        
+        # Отмечаем запись как отменённую
+        booking.is_cancelled = True
+        session.commit()
+        
+        date_str = booking.date.strftime('%d.%m.%Y')
+        time_str = booking.time_slot.strftime('%H:%M')
+        
+        # Уведомляем сотрудников об отмене
+        notification_text = (
+            f"❌ **Запись отменена!**\n\n"
+            f"👤 Клиент: {contract.client_fio}\n"
+            f"📞 Тел: {booking.client_phone}\n"
+            f"🏠 Объект: {contract.house_name}\n"
+            f"📅 Дата: {date_str}\n"
+            f"⏰ Время: {time_str}"
+        )
+        
+        recipients = [r[0] for r in session.query(Staff.telegram_id).all()]
+        if ADMIN_ID not in recipients:
+            recipients.append(ADMIN_ID)
+        
+        # Отправляем уведомления в фоновом режиме
+        async def send_cancel_notifications():
+            for emp_id in recipients:
+                try:
+                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown")
+                except Exception as e:
+                    logging.error(f"Ошибка уведомления {emp_id}: {e}")
+        
+        asyncio.create_task(send_cancel_notifications())
+    
+    await state.clear()
+    await callback.message.edit_text(
+        get_message('booking_cancelled', lang, date=date_str, time=time_str)
+    )
+    await callback.message.answer(
+        get_message('welcome', lang),
+        reply_markup=get_client_keyboard(lang)
+    )
+    await callback.answer()
+
+
+# ========== ОСНОВНОЙ ФЛОУ ЗАПИСИ ==========
 
 @router.message(F.text == "/start")
 async def client_start(message: types.Message, state: FSMContext):
@@ -94,14 +577,16 @@ async def client_start(message: types.Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("house_"))
 async def house_selected(callback: types.CallbackQuery, state: FSMContext):
-    house_name = callback.data.split("_")[1]
-    await state.update_data(selected_house=house_name)
+    house_name = callback.data.split("_", 1)[1]
+    user_id = callback.from_user.id
+    lang = get_user_language(user_id)
+    await state.update_data(selected_house=house_name, lang=lang)
     await state.set_state(ClientSteps.entering_contract)
 
+    object_label = "Obyekt" if lang == 'uz' else "Объект"
     await callback.message.edit_text(
-        f"🏘 Объект: **{house_name}**\n\nUlushdorlik shartnomasi raqamingizni kiriting, masalan, 12345-GHP\n"
-        "———————\n"
-        "Введите номер Вашего договора долевого участия по примеру 12345-GHP"
+        f"🏘 {object_label}: **{house_name}**\n\n{get_message('enter_contract', lang)}",
+        parse_mode="Markdown"
     )
     await callback.answer()
 
@@ -111,6 +596,8 @@ async def contract_entered(message: types.Message, state: FSMContext):
     user_contract = message.text.replace(" ", "").upper()
     data = await state.get_data()
     selected_house = data.get('selected_house')
+    user_id = message.from_user.id
+    lang = get_user_language(user_id)
 
     with SessionLocal() as session:
         contract = session.query(Contract).filter(
@@ -118,48 +605,127 @@ async def contract_entered(message: types.Message, state: FSMContext):
             Contract.house_name == selected_house
         ).first()
 
-        # Если договор НЕ найден
+        # Если договор НЕ найден - просим ввести заново
         if not contract:
-            error_text = (
-                f"{user_contract}-shartnoma topilmadi.\n"
-                f"Malumotlatni tekshiring yoki qo'llab-quvvatlash xizmatiga murojaat qiling:\n"
-                f"{OFFICE_PHONE}\n"
-                f"————\n\n"
-                f"Договор {user_contract} не найден.\n"
-                f"Проверьте данные или свяжитесь с поддержкой:\n"
-                f"{OFFICE_PHONE}"
+            await message.answer(
+                get_message('contract_not_found', lang)
             )
-            await message.answer(error_text)
+            # Остаёмся в том же состоянии, ожидая повторный ввод
             return
 
-        # Если договор найден, проверяем существующие записи
+        # Проверяем существующие активные записи на этот договор
         today = date.today()
-        last_booking = session.query(Booking).filter(
-            Booking.contract_id == contract.id
-        ).order_by(Booking.date.desc()).first()
-
-        if last_booking:
-            if last_booking.date >= today:
+        existing_booking = (
+            session.query(Booking)
+            .filter(
+                Booking.contract_id == contract.id,
+                Booking.date >= today,
+                Booking.is_cancelled == False
+            )
+            .first()
+        )
+        
+        if existing_booking:
+            # Определяем владельца записи (user_telegram_id или contract.telegram_id для старых записей)
+            booking_owner = existing_booking.user_telegram_id or contract.telegram_id
+            
+            # Если можем определить владельца и это не текущий пользователь - просим ввести другой договор
+            if booking_owner and booking_owner != user_id:
                 await message.answer(
-                    f"У вас уже есть активная запись на {last_booking.date.strftime('%d.%m.%Y')}.\n"
-                    "Вторая запись невозможна до завершения текущего визита."
+                    get_message('contract_unavailable', lang)
                 )
-                await state.clear()
                 return
-
-            allowed_from_date = last_booking.date + timedelta(days=2)
-            if today < allowed_from_date:
+            else:
+                # Это владелец договора или владелец неизвестен - у него уже есть активная запись
                 await message.answer(
-                    f"Повторная запись будет доступна только с {allowed_from_date.strftime('%d.%m.%Y')}.\n"
-                    "Между визитами должен пройти как минимум один полный день."
+                    get_message('has_active_booking', lang, date=existing_booking.date.strftime('%d.%m.%Y'))
                 )
-                await state.clear()
                 return
-
-        if not contract.telegram_id:
-            contract.telegram_id = message.from_user.id
-            session.commit()
-
+        
+        # Проверяем прошлые записи для определения владельца и периода ожидания
+        first_booking = (
+            session.query(Booking)
+            .filter(
+                Booking.contract_id == contract.id,
+                Booking.is_cancelled == False
+            )
+            .order_by(Booking.date.asc())
+            .first()
+        )
+        
+        last_booking = (
+            session.query(Booking)
+            .filter(
+                Booking.contract_id == contract.id,
+                Booking.is_cancelled == False
+            )
+            .order_by(Booking.date.desc())
+            .first()
+        )
+        
+        # Для 2-недельного периода ожидания - учитываем ВСЕ записи, включая отменённые
+        any_user_booking = (
+            session.query(Booking)
+            .filter(
+                Booking.contract_id == contract.id,
+                Booking.user_telegram_id == user_id
+            )
+            .first()
+        )
+        
+        # Определяем минимальную дату для записи
+        min_booking_date = get_min_booking_date()
+        
+        # Определяем владельца ТОЛЬКО по user_telegram_id первой записи
+        # contract.telegram_id не используем для определения владельца (legacy data)
+        contract_owner_id = None
+        if first_booking and first_booking.user_telegram_id:
+            contract_owner_id = first_booking.user_telegram_id
+        
+        # Если есть владелец (с user_telegram_id) и это не текущий пользователь - просим ввести другой договор
+        if contract_owner_id and contract_owner_id != user_id:
+            await message.answer(
+                get_message('contract_unavailable', lang)
+            )
+            return
+        
+        # Если у пользователя были любые записи на этот договор (включая отменённые) - ждать 2 недели
+        # Проверяем по user_telegram_id или по contract.telegram_id (для старых записей без user_telegram_id)
+        user_has_past_bookings = (
+            any_user_booking is not None or
+            contract.telegram_id == user_id
+        )
+        
+        if user_has_past_bookings:
+            # Находим последнюю запись пользователя на этот договор (включая отменённые и прошедшие)
+            last_user_booking = (
+                session.query(Booking)
+                .filter(
+                    Booking.contract_id == contract.id,
+                    Booking.user_telegram_id == user_id
+                )
+                .order_by(Booking.date.desc())
+                .first()
+            )
+            
+            # Если не нашли по user_telegram_id, проверяем по старому contract.telegram_id
+            if not last_user_booking and contract.telegram_id == user_id:
+                last_user_booking = (
+                    session.query(Booking)
+                    .filter(Booking.contract_id == contract.id)
+                    .order_by(Booking.date.desc())
+                    .first()
+                )
+            
+            # Для владельца договора - минимум 2 недели от даты последней записи
+            if last_user_booking:
+                two_weeks_from_last_booking = last_user_booking.date + timedelta(days=14)
+                min_booking_date = max(min_booking_date, two_weeks_from_last_booking)
+        
+        # Если delivery_date позже - берём её
+        if contract.delivery_date and contract.delivery_date > min_booking_date:
+            min_booking_date = contract.delivery_date
+        
         # Получаем лимит слотов для проекта
         slots_limit = get_project_slot_limit(session, contract.house_name)
 
@@ -167,34 +733,31 @@ async def contract_entered(message: types.Message, state: FSMContext):
             contract_id=contract.id,
             client_fio=contract.client_fio,
             apt_num=contract.apt_num,
-            house_name=contract.house_name,  # Сохраняем проект для получения правильного лимита
-            delivery_date=contract.delivery_date.isoformat(),
-            slots_limit=slots_limit  # Кешируем лимит проекта
+            house_name=contract.house_name,
+            delivery_date=min_booking_date.isoformat(),
+            slots_limit=slots_limit
         )
 
         # Определяем период для проверки занятых дат (90 дней вперёд)
-        start_date = contract.delivery_date
-        end_date = date.today() + timedelta(days=90)
+        start_date = min_booking_date
+        end_date = today + timedelta(days=90)
         
         # Получаем полностью занятые даты ДЛЯ ЭТОГО ПРОЕКТА
         fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit, contract.house_name)
 
         # Создаем клавиатуру с учётом занятых дат
         markup = generate_calendar(
-            min_date=contract.delivery_date,
+            min_date=min_booking_date,
             fully_booked_dates=fully_booked,
-            slots_limit=slots_limit
+            slots_limit=slots_limit,
+            lang=lang
         )
         await state.set_state(ClientSteps.selecting_date)
 
         await message.answer(
-            f"✅ Shartnoma tasdiqlandi: {contract.client_fio}\n"
-            f"Obyektni topshirish sanasi: {contract.delivery_date.strftime('%d.%m.%Y')}\n\n"
-            f"Taqvimda mavjud sanani tanlang:\n"
-            f"————————————————-\n"
-            f"✅ Договор подтвержден: {contract.client_fio}\n"
-            f"Дата сдачи объекта: {contract.delivery_date.strftime('%d.%m.%Y')}\n\n"
-            "Выберите доступную дату в календаре:",
+            get_message('contract_confirmed', lang,
+                       fio=contract.client_fio,
+                       date=min_booking_date.strftime('%d.%m.%Y')),
             reply_markup=markup
         )
 
@@ -230,12 +793,16 @@ async def calendar_navigation(callback: types.CallbackQuery, state: FSMContext):
         fully_booked = get_fully_booked_dates(session, first_day, last_day, slots_limit, house_name)
     
     # Перерисовываем календарь с новым месяцем/годом
+    user_id = callback.from_user.id
+    lang = get_user_language(user_id)
+    
     new_calendar = generate_calendar(
         year=year, 
         month=month, 
         min_date=delivery_date,
         fully_booked_dates=fully_booked,
-        slots_limit=slots_limit
+        slots_limit=slots_limit,
+        lang=lang
     )
     
     await callback.message.edit_reply_markup(reply_markup=new_calendar)
@@ -276,10 +843,14 @@ async def back_to_calendar(callback: types.CallbackQuery, state: FSMContext):
         fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit, house_name)
     
     # Генерируем календарь
+    user_id = callback.from_user.id
+    lang = get_user_language(user_id)
+    
     calendar_markup = generate_calendar(
         min_date=delivery_date,
         fully_booked_dates=fully_booked,
-        slots_limit=slots_limit
+        slots_limit=slots_limit,
+        lang=lang
     )
     
     await state.set_state(ClientSteps.selecting_date)
@@ -341,7 +912,8 @@ async def date_selected(callback: types.CallbackQuery, state: FSMContext):
             .join(Contract, Booking.contract_id == Contract.id)
             .filter(
                 Booking.date == selected_date,
-                Contract.house_name == house_name
+                Contract.house_name == house_name,
+                Booking.is_cancelled == False
             )
             .group_by(Booking.time_slot)
             .all()
@@ -353,24 +925,23 @@ async def date_selected(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(selected_date=selected_date_str)
     await state.set_state(ClientSteps.selecting_time)
 
-    # 1. Сначала генерируем клавиатуру со слотами времени
-    time_kb = generate_time_slots(selected_date_str, booked_dict, slots_limit)
+    # Получаем язык пользователя
+    user_id = callback.from_user.id
+    lang = get_user_language(user_id)
 
-    # 2. Подготавливаем переменные для текста
+    # Генерируем клавиатуру со слотами времени
+    time_kb = generate_time_slots(selected_date_str, booked_dict, slots_limit, lang)
+    
+    # Форматируем даты
     sel_date_fmt = selected_date.strftime('%d.%m.%Y')
     del_date_fmt = contract.delivery_date.strftime('%d.%m.%Y')
 
-    # 3. Формируем ваш двуязычный текст
-    message_text = (
-        f"📅 Siz sanani tanladingiz: **{sel_date_fmt}**\n"
-        f"🏠 Xonadoningizning topshirish sanasi: {del_date_fmt}\n\n"
-        f"Endi qulay vaqt oralig‘ini tanlang:\n"
-        f"————————————————\n"
-        f"📅 Вы выбрали дату: **{sel_date_fmt}**\n"
-        f"🏠 Дата сдачи вашей квартиры: {del_date_fmt}\n\n"
-        f"Теперь выберите удобный временной интервал:"
-    )
-    # 4. Обновляем сообщение
+    # Формируем текст на нужном языке
+    message_text = get_message('date_selected_choose_time', lang,
+                               selected_date=sel_date_fmt,
+                               delivery_date=del_date_fmt)
+    
+    # Обновляем сообщение
     await callback.message.edit_text(
         message_text,
         reply_markup=time_kb,
@@ -391,6 +962,8 @@ async def time_selected(callback: types.CallbackQuery, state: FSMContext):
     user_data = await state.get_data()
     slots_limit = user_data.get('slots_limit', 1)  # Используем кешированный лимит проекта
     house_name = user_data.get('house_name')  # Получаем название проекта
+    user_id = callback.from_user.id
+    lang = get_user_language(user_id)
 
     with SessionLocal() as session:
         # Проверяем количество бронирований для этого времени ТОЛЬКО ДЛЯ ЭТОГО ПРОЕКТА
@@ -400,7 +973,8 @@ async def time_selected(callback: types.CallbackQuery, state: FSMContext):
             .filter(
                 Booking.date == selected_date,
                 Booking.time_slot == selected_time,
-                Contract.house_name == house_name
+                Contract.house_name == house_name,
+                Booking.is_cancelled == False
             )
             .count()
         )
@@ -409,56 +983,72 @@ async def time_selected(callback: types.CallbackQuery, state: FSMContext):
             await callback.answer("Извините, это время только что заняли.", show_alert=True)
             return
 
-    # Сохраняем выбранное время в state и запрашиваем телефон
+    # Сохраняем выбранное время в state
     await state.update_data(selected_date=date_str, selected_time=time_str)
-    await state.set_state(ClientSteps.entering_phone)
-
-    await callback.message.answer(
-        "📞 Iltimos, joriy aloqa telefon raqamingizni kiriting yoki pastdagi tugmani bosing:\n"
-        "———————\n"
-        "📞 Пожалуйста, введите ваш актуальный номер телефона для связи или нажмите кнопку ниже:\n\n"
-        "Формат: +998901234567 или 998901234567",
-        reply_markup=get_phone_request_keyboard()
-    )
-    await callback.message.delete()
+    
+    # Проверяем, есть ли сохранённый телефон
+    saved_phone = get_user_phone(user_id)
+    
+    if saved_phone:
+        # Показываем выбор: использовать сохранённый или ввести новый
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text=get_message('use_saved_phone', lang, phone=saved_phone),
+            callback_data=f"use_phone_{saved_phone}"
+        )
+        builder.button(
+            text=get_message('enter_new_phone', lang),
+            callback_data="new_phone"
+        )
+        builder.adjust(1)
+        
+        await state.set_state(ClientSteps.entering_phone)
+        await callback.message.edit_text(
+            get_message('phone_choice', lang),
+            reply_markup=builder.as_markup()
+        )
+    else:
+        # Нет сохранённого телефона - запрашиваем ввод
+        await state.set_state(ClientSteps.entering_phone)
+        await callback.message.answer(
+            get_message('enter_phone', lang),
+            reply_markup=get_phone_request_keyboard(lang)
+        )
+        await callback.message.delete()
+    
     await callback.answer()
 
-@router.message(ClientSteps.entering_phone, F.contact)
-async def phone_contact_received(message: types.Message, state: FSMContext, bot: Bot):
-    """Обработка номера телефона, полученного через кнопку Telegram"""
-    user_phone = message.contact.phone_number
+
+@router.callback_query(F.data.startswith("use_phone_"), ClientSteps.entering_phone)
+async def use_saved_phone(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    """Использовать сохранённый номер телефона"""
+    saved_phone = callback.data.replace("use_phone_", "")
     
-    # Добавляем + если его нет
-    if not user_phone.startswith('+'):
-        user_phone = '+' + user_phone
-    
-    await process_phone_booking(message, state, bot, user_phone)
+    # Создаём фейковое сообщение для унификации обработки
+    await callback.message.delete()
+    await process_phone_booking_callback(callback, state, bot, saved_phone)
+    await callback.answer()
 
 
-@router.message(ClientSteps.entering_phone)
-async def phone_entered(message: types.Message, state: FSMContext, bot: Bot):
-    """Обработка номера телефона, введённого вручную"""
-    user_phone = message.text.strip()
+@router.callback_query(F.data == "new_phone", ClientSteps.entering_phone)
+async def enter_new_phone(callback: types.CallbackQuery, state: FSMContext):
+    """Пользователь хочет ввести новый номер"""
+    user_id = callback.from_user.id
+    lang = get_user_language(user_id)
     
-    # Валидация номера
-    is_valid, cleaned_phone = validate_phone_number(user_phone)
-    
-    if not is_valid:
-        await message.answer(
-            "❌ Неверный формат номера телефона.\n\n"
-            "Noto'g'ri telefon raqam formati.\n\n"
-            "Используйте формат: +998901234567 или 998901234567\n"
-            "Format: +998901234567 yoki 998901234567",
-            reply_markup=get_phone_request_keyboard()
-        )
-        return
-    
-    await process_phone_booking(message, state, bot, cleaned_phone)
+    await callback.message.edit_text(get_message('enter_phone', lang))
+    await callback.message.answer(
+        get_message('enter_phone', lang),
+        reply_markup=get_phone_request_keyboard(lang)
+    )
+    await callback.answer()
 
 
-async def process_phone_booking(message: types.Message, state: FSMContext, bot: Bot, user_phone: str):
-    """Общая логика обработки бронирования после получения номера телефона"""
+async def process_phone_booking_callback(callback: types.CallbackQuery, state: FSMContext, bot: Bot, user_phone: str):
+    """Обработка бронирования при использовании сохранённого номера (через callback)"""
     user_data = await state.get_data()
+    user_id = callback.from_user.id
+    lang = get_user_language(user_id)
 
     # Извлекаем данные для подстановки в текст
     selected_date = datetime.strptime(user_data['selected_date'], '%Y-%m-%d').date()
@@ -466,9 +1056,15 @@ async def process_phone_booking(message: types.Message, state: FSMContext, bot: 
     selected_time = datetime.strptime(time_str, '%H:%M').time()
 
     with SessionLocal() as session:
+        # Привязываем договор к пользователю (первая запись = владелец)
+        contract = session.query(Contract).filter(Contract.id == user_data['contract_id']).first()
+        if contract and not contract.telegram_id:
+            contract.telegram_id = user_id
+        
         # Сохранение записи в базу данных
         new_booking = Booking(
             contract_id=user_data['contract_id'],
+            user_telegram_id=user_id,
             date=selected_date,
             time_slot=selected_time,
             client_phone=user_phone
@@ -491,46 +1087,201 @@ async def process_phone_booking(message: types.Message, state: FSMContext, bot: 
         if ADMIN_ID not in recipients:
             recipients.append(ADMIN_ID)
 
-        for emp_id in recipients:
-            try:
-                await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown")
-            except Exception as e:
-                logging.error(f"Ошибка уведомления {emp_id}: {e}")
+        # Отправляем уведомления в фоновом режиме
+        async def send_booking_notifications():
+            for emp_id in recipients:
+                try:
+                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown")
+                except Exception as e:
+                    logging.error(f"Ошибка уведомления {emp_id}: {e}")
+        
+        asyncio.create_task(send_booking_notifications())
 
-    # Убираем клавиатуру и отправляем подтверждение
-    success_text = (
-        f"Kvartirangizni topshirish uchun uchrashuv tasdiqlandi.\n\n"
-        f"📍 {OFFICE_ADDRESS}\n"
-        f"🏠 Kvartira raqami {user_data['apt_num']}\n"
-        f"📅 Sana: {selected_date.strftime('%d.%m.%Y')}\n"
-        f"⏰ Vaqt: {time_str}\n"
-        f"📞 Telefon: {OFFICE_PHONE}\n\n"
-        f"Kalitni topshirish faqat ulushdorlarga yoki notarial tasdiqlangan ishonchnomaga ega bo'lgan vakillarga topshiriladi.\n\n"
-        f"O'zingiz bilan pasport/shaxsni tasdiqlovchi hujjat va ulushdorlik shartnomasi bo'lishi kerak.\n\n"
-        f"Agar 15 daqiqadan ko'proq kechiksangiz, topshirish qayta rejalashtirilishi mumkin. Iltimos, vaqtida keling.\n\n"
-        f"Agar qatnasha olmasangiz, iltimos, bizga oldindan xabar bering.\n\n"
-        f"Oldindan yozilmasdan kalitlarni topshirish mumkin emas.\n"
-        f"———————————————————-\n"
-        f"Ваша запись на передачу квартиры подтверждена.\n\n"
-        f"📍 {OFFICE_ADDRESS}\n"
-        f"🏠 Квартира № {user_data['apt_num']}\n"
-        f"📅 Дата: {selected_date.strftime('%d.%m.%Y')}\n"
-        f"⏰ Время: {time_str}\n"
-        f"📞 Телефон: {OFFICE_PHONE}\n\n"
-        f"Передача ключей строго дольщику, либо представителю дольщика, по нотариально оформленной доверенности.\n"
-        f"При себе необходимо иметь паспорт/ID и договор долевого участия.\n\n"
-        f"В случае опоздания более чем на 15 минут передача может быть перенесена. Просим прибыть вовремя.\n\n"
-        f"В случае невозможности визита — сообщите заранее.\n\n"
-        f"Передача без записи невозможна."
+    # Отправляем подтверждение
+    project_address = get_project_address(user_data.get('selected_house', ''), lang)
+    address_line = f"📍 {project_address}\n" if project_address else ""
+    
+    if lang == 'uz':
+        success_text = (
+            f"Kvartirangizni topshirish uchun uchrashuv tasdiqlandi.\n\n"
+            f"{address_line}"
+            f"🏠 Kvartira raqami {user_data['apt_num']}\n"
+            f"📅 Sana: {selected_date.strftime('%d.%m.%Y')}\n"
+            f"⏰ Vaqt: {time_str}\n"
+            f"📞 Telefon: {OFFICE_PHONE}\n\n"
+            f"Kalitni topshirish faqat ulushdorlarga yoki notarial tasdiqlangan ishonchnomaga ega bo'lgan vakillarga topshiriladi.\n\n"
+            f"O'zingiz bilan pasport/shaxsni tasdiqlovchi hujjat va ulushdorlik shartnomasi bo'lishi kerak.\n\n"
+            f"Agar 15 daqiqadan ko'proq kechiksangiz, topshirish qayta rejalashtirilishi mumkin. Iltimos, vaqtida keling.\n\n"
+            f"Agar qatnasha olmasangiz, iltimos, bizga oldindan xabar bering.\n\n"
+            f"Oldindan yozilmasdan kalitlarni topshirish mumkin emas."
+        )
+    else:
+        success_text = (
+            f"Ваша запись на передачу квартиры подтверждена.\n\n"
+            f"{address_line}"
+            f"🏠 Квартира № {user_data['apt_num']}\n"
+            f"📅 Дата: {selected_date.strftime('%d.%m.%Y')}\n"
+            f"⏰ Время: {time_str}\n"
+            f"📞 Телефон: {OFFICE_PHONE}\n\n"
+            f"Передача ключей строго дольщику, либо представителю дольщика, по нотариально оформленной доверенности.\n"
+            f"При себе необходимо иметь паспорт/ID и договор долевого участия.\n\n"
+            f"В случае опоздания более чем на 15 минут передача может быть перенесена. Просим прибыть вовремя.\n\n"
+            f"В случае невозможности визита — сообщите заранее.\n\n"
+            f"Передача без записи невозможна."
+        )
+
+    await callback.message.answer(success_text, parse_mode="Markdown", reply_markup=get_client_keyboard(lang))
+
+    # Отправка геолокации проекта (или офиса по умолчанию)
+    coords = get_project_coordinates(user_data.get('selected_house', ''))
+    if coords:
+        lat, lon = coords
+    else:
+        lat, lon = OFFICE_LAT, OFFICE_LON
+    
+    await bot.send_location(
+        chat_id=callback.from_user.id,
+        latitude=lat,
+        longitude=lon
     )
 
-    await message.answer(success_text, parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+    await state.clear()
 
-    # Отправка геолокации офиса
+
+@router.message(ClientSteps.entering_phone, F.contact)
+async def phone_contact_received(message: types.Message, state: FSMContext, bot: Bot):
+    """Обработка номера телефона, полученного через кнопку Telegram"""
+    user_phone = message.contact.phone_number
+    
+    # Добавляем + если его нет
+    if not user_phone.startswith('+'):
+        user_phone = '+' + user_phone
+    
+    await process_phone_booking(message, state, bot, user_phone)
+
+
+@router.message(ClientSteps.entering_phone)
+async def phone_entered(message: types.Message, state: FSMContext, bot: Bot):
+    """Обработка номера телефона, введённого вручную"""
+    user_phone = message.text.strip()
+    user_id = message.from_user.id
+    lang = get_user_language(user_id)
+    
+    # Валидация номера
+    is_valid, cleaned_phone = validate_phone_number(user_phone)
+    
+    if not is_valid:
+        await message.answer(
+            get_message('invalid_phone', lang),
+            reply_markup=get_phone_request_keyboard(lang)
+        )
+        return
+    
+    await process_phone_booking(message, state, bot, cleaned_phone)
+
+
+async def process_phone_booking(message: types.Message, state: FSMContext, bot: Bot, user_phone: str):
+    """Общая логика обработки бронирования после получения номера телефона"""
+    user_data = await state.get_data()
+    user_id = message.from_user.id
+    lang = get_user_language(user_id)
+    
+    # Сохраняем номер телефона для будущих записей
+    set_user_phone(user_id, user_phone)
+
+    # Извлекаем данные для подстановки в текст
+    selected_date = datetime.strptime(user_data['selected_date'], '%Y-%m-%d').date()
+    time_str = user_data['selected_time']
+    selected_time = datetime.strptime(time_str, '%H:%M').time()
+
+    with SessionLocal() as session:
+        # Привязываем договор к пользователю (первая запись = владелец)
+        contract = session.query(Contract).filter(Contract.id == user_data['contract_id']).first()
+        if contract and not contract.telegram_id:
+            contract.telegram_id = user_id
+        
+        # Сохранение записи в базу данных
+        new_booking = Booking(
+            contract_id=user_data['contract_id'],
+            user_telegram_id=user_id,  # Сохраняем ID пользователя, создавшего запись
+            date=selected_date,
+            time_slot=selected_time,
+            client_phone=user_phone
+        )
+        session.add(new_booking)
+        session.commit()
+
+        # Уведомление сотрудников
+        notification_text = (
+            f"🔔 **Новая запись на прием!**\n\n"
+            f"👤 Клиент: {user_data['client_fio']}\n"
+            f"📞 Тел: {user_phone}\n"
+            f"🏠 Объект: {user_data['selected_house']}\n"
+            f"📅 Дата: {selected_date.strftime('%d.%m.%Y')}\n"
+            f"⏰ Время: {time_str}"
+        )
+
+        # Получаем список ID всех сотрудников и админа для рассылки
+        recipients = [r[0] for r in session.query(Staff.telegram_id).all()]
+        if ADMIN_ID not in recipients:
+            recipients.append(ADMIN_ID)
+
+        # Отправляем уведомления в фоновом режиме
+        async def send_booking_notifications():
+            for emp_id in recipients:
+                try:
+                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown")
+                except Exception as e:
+                    logging.error(f"Ошибка уведомления {emp_id}: {e}")
+        
+        asyncio.create_task(send_booking_notifications())
+
+    # Убираем клавиатуру и отправляем подтверждение
+    project_address = get_project_address(user_data.get('selected_house', ''), lang)
+    address_line = f"📍 {project_address}\n" if project_address else ""
+    
+    if lang == 'uz':
+        success_text = (
+            f"Kvartirangizni topshirish uchun uchrashuv tasdiqlandi.\n\n"
+            f"{address_line}"
+            f"🏠 Kvartira raqami {user_data['apt_num']}\n"
+            f"📅 Sana: {selected_date.strftime('%d.%m.%Y')}\n"
+            f"⏰ Vaqt: {time_str}\n"
+            f"📞 Telefon: {OFFICE_PHONE}\n\n"
+            f"Kalitni topshirish faqat ulushdorlarga yoki notarial tasdiqlangan ishonchnomaga ega bo'lgan vakillarga topshiriladi.\n\n"
+            f"O'zingiz bilan pasport/shaxsni tasdiqlovchi hujjat va ulushdorlik shartnomasi bo'lishi kerak.\n\n"
+            f"Agar 15 daqiqadan ko'proq kechiksangiz, topshirish qayta rejalashtirilishi mumkin. Iltimos, vaqtida keling.\n\n"
+            f"Agar qatnasha olmasangiz, iltimos, bizga oldindan xabar bering.\n\n"
+            f"Oldindan yozilmasdan kalitlarni topshirish mumkin emas."
+        )
+    else:
+        success_text = (
+            f"Ваша запись на передачу квартиры подтверждена.\n\n"
+            f"{address_line}"
+            f"🏠 Квартира № {user_data['apt_num']}\n"
+            f"📅 Дата: {selected_date.strftime('%d.%m.%Y')}\n"
+            f"⏰ Время: {time_str}\n"
+            f"📞 Телефон: {OFFICE_PHONE}\n\n"
+            f"Передача ключей строго дольщику, либо представителю дольщика, по нотариально оформленной доверенности.\n"
+            f"При себе необходимо иметь паспорт/ID и договор долевого участия.\n\n"
+            f"В случае опоздания более чем на 15 минут передача может быть перенесена. Просим прибыть вовремя.\n\n"
+            f"В случае невозможности визита — сообщите заранее.\n\n"
+            f"Передача без записи невозможна."
+        )
+
+    await message.answer(success_text, parse_mode="Markdown", reply_markup=get_client_keyboard(lang))
+
+    # Отправка геолокации проекта (или офиса по умолчанию)
+    coords = get_project_coordinates(user_data.get('selected_house', ''))
+    if coords:
+        lat, lon = coords
+    else:
+        lat, lon = OFFICE_LAT, OFFICE_LON
+    
     await bot.send_location(
         chat_id=message.from_user.id,
-        latitude=OFFICE_LAT,
-        longitude=OFFICE_LON
+        latitude=lat,
+        longitude=lon
     )
 
     await state.clear()

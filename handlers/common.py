@@ -7,8 +7,9 @@ from database.session import SessionLocal
 from database.models import Contract
 from utils.states import ClientSteps
 from keyboards.inline import generate_houses_kb
-from keyboards.reply import get_admin_keyboard, get_employee_keyboard
+from keyboards.reply import get_admin_keyboard, get_employee_keyboard, get_client_keyboard
 from utils.auth import is_admin, is_staff
+from utils.language import get_user_language, get_message
 
 router = Router()
 
@@ -24,7 +25,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
             "🔧 **Админ-панель**\n\n"
             "Используйте кнопки ниже для управления ботом.\n"
             "Доступные команды:\n"
-            "• /menu — показать меню\n"
             "• /start — перезапуск бота",
             parse_mode="Markdown",
             reply_markup=get_admin_keyboard()
@@ -37,31 +37,14 @@ async def cmd_start(message: types.Message, state: FSMContext):
             "👔 **Панель сотрудника**\n\n"
             "Используйте кнопки ниже для работы с записями.\n"
             "Доступные команды:\n"
-            "• /menu — показать меню\n"
             "• /start — перезапуск бота",
             parse_mode="Markdown",
             reply_markup=get_employee_keyboard()
         )
         return
 
-    # Обычный пользователь - показываем выбор проекта
-    with SessionLocal() as session:
-        result = session.execute(select(Contract.house_name).distinct()).scalars().all()
-        houses = [h for h in result if h]
+    # Обычный пользователь - показываем клавиатуру клиента
+    lang = get_user_language(user_id)
+    welcome_text = get_message('welcome', lang)
 
-    if not houses:
-        await message.answer("🏠 Доступных объектов пока нет.")
-        return
-
-    await state.set_state(ClientSteps.selecting_house)
-
-    # Текст приветствия на двух языках
-    welcome_text = (
-        "👋 Salom!\n"
-        "Kalitlarni olishni rejalashtirish uchun, iltimos, turar-joy majmuangizni tanlang.\n"
-        "——————————\n"
-        "👋 Здравствуйте!\n"
-        "Для записи на передачу ключей выберите свой жилой комплекс."
-    )
-
-    await message.answer(welcome_text, reply_markup=generate_houses_kb(houses))
+    await message.answer(welcome_text, reply_markup=get_client_keyboard(lang))
