@@ -1,23 +1,79 @@
 import logging
+import re
 from datetime import datetime, timedelta, date
 
 from aiogram import Router, F, types, Bot
 from aiogram.fsm.context import FSMContext
+from aiogram.types import ReplyKeyboardRemove
 from sqlalchemy import select, func
 
 from config import ADMIN_ID
-from database.models import Booking, Setting, Contract, Staff
+from database.models import Booking, Setting, Contract, Staff, ProjectSlots
 from database.session import SessionLocal
 from keyboards import inline
 from keyboards.inline import generate_time_slots, generate_calendar, get_min_booking_date, get_fully_booked_dates, SLOTS_PER_DAY
+from keyboards.reply import get_phone_request_keyboard
 from utils.states import ClientSteps
 
 router = Router()
 
-OFFICE_ADDRESS = "г. Ташкент, Яшнабадский район, ул. Фаргона йули 27 (O’Z Zamin)"
+OFFICE_ADDRESS = "г. Ташкент, Яшнабадский район, ул. Фаргона йули 27 (O'Z Zamin)"
 OFFICE_LAT = 41.281067
 OFFICE_LON = 69.306903
 OFFICE_PHONE = "+998781485115"
+
+
+def validate_phone_number(phone: str) -> tuple[bool, str]:
+    """
+    Валидация номера телефона.
+    
+    Args:
+        phone: Введённый номер телефона
+    
+    Returns:
+        tuple: (is_valid, cleaned_phone) - валиден ли номер и очищенная версия
+    """
+    # Удаляем все пробелы, дефисы, скобки
+    cleaned = re.sub(r'[\s\-\(\)]+', '', phone)
+    
+    # Проверяем, что остались только цифры и возможно + в начале
+    if not re.match(r'^\+?\d+$', cleaned):
+        return False, ""
+    
+    # Удаляем + для подсчёта цифр
+    digits_only = cleaned.lstrip('+')
+    
+    # Проверяем длину (от 9 до 15 цифр - международный стандарт)
+    if len(digits_only) < 9 or len(digits_only) > 15:
+        return False, ""
+    
+    # Если номер начинается не с +, добавляем +
+    if not cleaned.startswith('+'):
+        cleaned = '+' + cleaned
+    
+    return True, cleaned
+
+
+def get_project_slot_limit(session, project_name: str) -> int:
+    """
+    Получить лимит слотов для конкретного проекта.
+    Если лимит не установлен для проекта, используется глобальный лимит.
+    
+    Args:
+        session: SQLAlchemy сессия
+        project_name: Название проекта (house_name)
+    
+    Returns:
+        int: Лимит записей на один слот
+    """
+    # Проверяем индивидуальный лимит для проекта
+    project_slot = session.query(ProjectSlots).filter_by(project_name=project_name).first()
+    if project_slot:
+        return project_slot.slots_limit
+    
+    # Если нет индивидуального - используем глобальный
+    global_setting = session.query(Setting).filter_by(key='slots_per_interval').first()
+    return global_setting.value if global_setting else 1
 
 
 @router.message(F.text == "/start")
@@ -104,24 +160,24 @@ async def contract_entered(message: types.Message, state: FSMContext):
             contract.telegram_id = message.from_user.id
             session.commit()
 
-        # Получаем лимит слотов
-        limit_setting = session.query(Setting).filter_by(key='slots_per_interval').first()
-        slots_limit = limit_setting.value if limit_setting else 1
+        # Получаем лимит слотов для проекта
+        slots_limit = get_project_slot_limit(session, contract.house_name)
 
         await state.update_data(
             contract_id=contract.id,
             client_fio=contract.client_fio,
             apt_num=contract.apt_num,
+            house_name=contract.house_name,  # Сохраняем проект для получения правильного лимита
             delivery_date=contract.delivery_date.isoformat(),
-            slots_limit=slots_limit  # Кешируем лимит
+            slots_limit=slots_limit  # Кешируем лимит проекта
         )
 
         # Определяем период для проверки занятых дат (90 дней вперёд)
         start_date = contract.delivery_date
         end_date = date.today() + timedelta(days=90)
         
-        # Получаем полностью занятые даты
-        fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit)
+        # Получаем полностью занятые даты ДЛЯ ЭТОГО ПРОЕКТА
+        fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit, contract.house_name)
 
         # Создаем клавиатуру с учётом занятых дат
         markup = generate_calendar(
@@ -166,9 +222,12 @@ async def calendar_navigation(callback: types.CallbackQuery, state: FSMContext):
     first_day = date(year, month, 1)
     last_day = date(year, month, cal_module.monthrange(year, month)[1])
     
+    # Получаем house_name из состояния
+    house_name = user_data.get('house_name')
+    
     with SessionLocal() as session:
-        # Запрашиваем занятые даты только для текущего месяца
-        fully_booked = get_fully_booked_dates(session, first_day, last_day, slots_limit)
+        # Запрашиваем занятые даты только для текущего месяца И ПРОЕКТА
+        fully_booked = get_fully_booked_dates(session, first_day, last_day, slots_limit, house_name)
     
     # Перерисовываем календарь с новым месяцем/годом
     new_calendar = generate_calendar(
@@ -199,6 +258,7 @@ async def back_to_calendar(callback: types.CallbackQuery, state: FSMContext):
     user_data = await state.get_data()
     delivery_date_str = user_data.get('delivery_date')
     slots_limit = user_data.get('slots_limit', 1)
+    house_name = user_data.get('house_name')  # Получаем название проекта
     
     if delivery_date_str:
         from datetime import datetime as dt
@@ -208,12 +268,12 @@ async def back_to_calendar(callback: types.CallbackQuery, state: FSMContext):
     
     today = date.today()
     
-    # Запрашиваем занятые даты на 90 дней вперёд (как при первоначальной загрузке)
+    # Запрашиваем занятые даты на 90 дней вперёд ДЛЯ ЭТОГО ПРОЕКТА
     start_date = delivery_date if delivery_date else today
     end_date = today + timedelta(days=90)
     
     with SessionLocal() as session:
-        fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit)
+        fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit, house_name)
     
     # Генерируем календарь
     calendar_markup = generate_calendar(
@@ -262,6 +322,8 @@ async def date_selected(callback: types.CallbackQuery, state: FSMContext):
 
     user_data = await state.get_data()
     contract_id = user_data.get('contract_id')
+    slots_limit = user_data.get('slots_limit', 1)  # Используем кешированный лимит проекта
+    house_name = user_data.get('house_name')  # Получаем название проекта
 
     with SessionLocal() as session:
         contract = session.query(Contract).filter(Contract.id == contract_id).first()
@@ -270,14 +332,20 @@ async def date_selected(callback: types.CallbackQuery, state: FSMContext):
             await state.clear()
             return
 
-        # Получаем настройки лимитов и текущие бронирования для клавиатуры
-        limit_setting = session.query(Setting).filter_by(key='slots_per_interval').first()
-        limit = limit_setting.value if limit_setting else 1
-
-        bookings = session.query(
-            Booking.time_slot,
-            func.count(Booking.id)
-        ).filter(Booking.date == selected_date).group_by(Booking.time_slot).all()
+        # Получаем текущие бронирования для выбранной даты ТОЛЬКО ДЛЯ ЭТОГО ПРОЕКТА
+        bookings = (
+            session.query(
+                Booking.time_slot,
+                func.count(Booking.id)
+            )
+            .join(Contract, Booking.contract_id == Contract.id)
+            .filter(
+                Booking.date == selected_date,
+                Contract.house_name == house_name
+            )
+            .group_by(Booking.time_slot)
+            .all()
+        )
 
         booked_dict = {row[0]: row[1] for row in bookings}
 
@@ -286,7 +354,7 @@ async def date_selected(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ClientSteps.selecting_time)
 
     # 1. Сначала генерируем клавиатуру со слотами времени
-    time_kb = generate_time_slots(selected_date_str, booked_dict, limit)
+    time_kb = generate_time_slots(selected_date_str, booked_dict, slots_limit)
 
     # 2. Подготавливаем переменные для текста
     sel_date_fmt = selected_date.strftime('%d.%m.%Y')
@@ -320,16 +388,24 @@ async def time_selected(callback: types.CallbackQuery, state: FSMContext):
     selected_date = datetime.strptime(date_str, '%Y-%m-%d').date()
     selected_time = datetime.strptime(time_str, '%H:%M').time()
 
+    user_data = await state.get_data()
+    slots_limit = user_data.get('slots_limit', 1)  # Используем кешированный лимит проекта
+    house_name = user_data.get('house_name')  # Получаем название проекта
+
     with SessionLocal() as session:
-        limit_setting = session.query(Setting).filter_by(key='slots_per_interval').first()
-        limit = limit_setting.value if limit_setting else 1
+        # Проверяем количество бронирований для этого времени ТОЛЬКО ДЛЯ ЭТОГО ПРОЕКТА
+        current_bookings = (
+            session.query(Booking)
+            .join(Contract, Booking.contract_id == Contract.id)
+            .filter(
+                Booking.date == selected_date,
+                Booking.time_slot == selected_time,
+                Contract.house_name == house_name
+            )
+            .count()
+        )
 
-        current_bookings = session.query(Booking).filter(
-            Booking.date == selected_date,
-            Booking.time_slot == selected_time
-        ).count()
-
-        if current_bookings >= limit:
+        if current_bookings >= slots_limit:
             await callback.answer("Извините, это время только что заняли.", show_alert=True)
             return
 
@@ -337,16 +413,51 @@ async def time_selected(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(selected_date=date_str, selected_time=time_str)
     await state.set_state(ClientSteps.entering_phone)
 
-    await callback.message.edit_text(
-        "📞 Iltimos, joriy aloqa telefon raqamingizni kiriting:\n"
+    await callback.message.answer(
+        "📞 Iltimos, joriy aloqa telefon raqamingizni kiriting yoki pastdagi tugmani bosing:\n"
         "———————\n"
-        "📞 Пожалуйста, введите ваш актуальный номер телефона для связи:"
+        "📞 Пожалуйста, введите ваш актуальный номер телефона для связи или нажмите кнопку ниже:\n\n"
+        "Формат: +998901234567 или 998901234567",
+        reply_markup=get_phone_request_keyboard()
     )
+    await callback.message.delete()
     await callback.answer()
+
+@router.message(ClientSteps.entering_phone, F.contact)
+async def phone_contact_received(message: types.Message, state: FSMContext, bot: Bot):
+    """Обработка номера телефона, полученного через кнопку Telegram"""
+    user_phone = message.contact.phone_number
+    
+    # Добавляем + если его нет
+    if not user_phone.startswith('+'):
+        user_phone = '+' + user_phone
+    
+    await process_phone_booking(message, state, bot, user_phone)
+
 
 @router.message(ClientSteps.entering_phone)
 async def phone_entered(message: types.Message, state: FSMContext, bot: Bot):
+    """Обработка номера телефона, введённого вручную"""
     user_phone = message.text.strip()
+    
+    # Валидация номера
+    is_valid, cleaned_phone = validate_phone_number(user_phone)
+    
+    if not is_valid:
+        await message.answer(
+            "❌ Неверный формат номера телефона.\n\n"
+            "Noto'g'ri telefon raqam formati.\n\n"
+            "Используйте формат: +998901234567 или 998901234567\n"
+            "Format: +998901234567 yoki 998901234567",
+            reply_markup=get_phone_request_keyboard()
+        )
+        return
+    
+    await process_phone_booking(message, state, bot, cleaned_phone)
+
+
+async def process_phone_booking(message: types.Message, state: FSMContext, bot: Bot, user_phone: str):
+    """Общая логика обработки бронирования после получения номера телефона"""
     user_data = await state.get_data()
 
     # Извлекаем данные для подстановки в текст
@@ -386,7 +497,7 @@ async def phone_entered(message: types.Message, state: FSMContext, bot: Bot):
             except Exception as e:
                 logging.error(f"Ошибка уведомления {emp_id}: {e}")
 
-    # Ваш обновленный текст подтверждения
+    # Убираем клавиатуру и отправляем подтверждение
     success_text = (
         f"Kvartirangizni topshirish uchun uchrashuv tasdiqlandi.\n\n"
         f"📍 {OFFICE_ADDRESS}\n"
@@ -413,7 +524,7 @@ async def phone_entered(message: types.Message, state: FSMContext, bot: Bot):
         f"Передача без записи невозможна."
     )
 
-    await message.answer(success_text, parse_mode="Markdown")
+    await message.answer(success_text, parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
 
     # Отправка геолокации офиса
     await bot.send_location(

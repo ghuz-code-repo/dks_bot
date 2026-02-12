@@ -8,7 +8,7 @@ import certifi
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from config import BOT_TOKEN
-from handlers import admin, client, common
+from handlers import admin, client, common, employee
 from database.session import init_db
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from utils.notifier import check_reminders
@@ -61,6 +61,7 @@ async def main():
     dp = Dispatcher()
 
     dp.include_router(admin.router)
+    dp.include_router(employee.router)  # Роутер для сотрудников
     dp.include_router(common.router)
     dp.include_router(client.router)
 

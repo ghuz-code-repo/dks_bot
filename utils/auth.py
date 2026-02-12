@@ -17,3 +17,12 @@ def is_admin(user_id: int) -> bool:
     with SessionLocal() as session:
         staff = session.query(Staff).filter_by(telegram_id=user_id, role='admin').first()
         return staff is not None
+
+
+def is_staff(user_id: int) -> bool:
+    """Проверка, является ли пользователь сотрудником (админом или обычным сотрудником)"""
+    if user_id == ADMIN_ID:  # Супер-админ из config.py
+        return True
+    with SessionLocal() as session:
+        staff = session.query(Staff).filter_by(telegram_id=user_id).first()
+        return staff is not None

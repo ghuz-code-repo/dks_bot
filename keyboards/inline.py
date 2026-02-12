@@ -43,33 +43,44 @@ def get_min_booking_date() -> date:
         return get_next_working_day(next_working)
 
 
-def get_fully_booked_dates(session, start_date: date, end_date: date, slots_limit: int) -> set:
+def get_fully_booked_dates(session, start_date: date, end_date: date, slots_limit: int, house_name: str = None) -> set:
     """
-    Возвращает множество дат, где все слоты заняты.
+    Возвращает множество дат, где все слоты заняты для конкретного проекта.
     
     Args:
         session: SQLAlchemy сессия
         start_date: Начало периода
         end_date: Конец периода  
         slots_limit: Лимит записей на один слот
+        house_name: Название проекта (для раздельного учёта слотов по проектам)
     
     Returns:
-        set[date]: Множество полностью занятых дат
+        set[date]: Множество полностью занятых дат для указанного проекта
     """
     from sqlalchemy import func
-    from database.models import Booking
+    from database.models import Booking, Contract
     
     # Общее количество возможных записей в день = слоты * лимит на слот
     max_bookings_per_day = SLOTS_PER_DAY * slots_limit
     
-    # Считаем количество записей по датам
-    bookings_per_date = session.query(
-        Booking.date,
-        func.count(Booking.id).label('count')
-    ).filter(
-        Booking.date >= start_date,
-        Booking.date <= end_date
-    ).group_by(Booking.date).all()
+    # Считаем количество записей по датам для конкретного проекта
+    query = (
+        session.query(
+            Booking.date,
+            func.count(Booking.id).label('count')
+        )
+        .join(Contract, Booking.contract_id == Contract.id)
+        .filter(
+            Booking.date >= start_date,
+            Booking.date <= end_date
+        )
+    )
+    
+    # Фильтруем по проекту, если указан
+    if house_name:
+        query = query.filter(Contract.house_name == house_name)
+    
+    bookings_per_date = query.group_by(Booking.date).all()
     
     # Возвращаем даты где записей >= максимума
     fully_booked = set()

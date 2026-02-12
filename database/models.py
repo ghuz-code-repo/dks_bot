@@ -24,6 +24,14 @@ class Setting(Base):
     key = Column(String, primary_key=True)
     value = Column(Integer)
 
+
+class ProjectSlots(Base):
+    """Лимиты слотов для каждого проекта"""
+    __tablename__ = 'project_slots'
+    project_name = Column(String, primary_key=True)  # Название проекта (house_name)
+    slots_limit = Column(Integer, default=1)  # Лимит записей на один слот
+
+
 class Staff(Base):
     __tablename__ = 'staff'
     id = Column(Integer, primary_key=True)

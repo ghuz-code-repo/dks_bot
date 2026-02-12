@@ -7,7 +7,8 @@ from database.session import SessionLocal
 from database.models import Contract
 from utils.states import ClientSteps
 from keyboards.inline import generate_houses_kb
-from utils.auth import is_admin
+from keyboards.reply import get_admin_keyboard, get_employee_keyboard
+from utils.auth import is_admin, is_staff
 
 router = Router()
 
@@ -15,19 +16,35 @@ router = Router()
 @router.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
+    user_id = message.from_user.id
 
-    if is_admin(message.from_user.id):
+    # Проверка на администратора
+    if is_admin(user_id):
         await message.answer(
-            "💻 **Админ-панель**\n\n"
-            "• `/report` — выгрузить все записи в Excel\n"
-            "• `/set_slots [число]` — кол-во сотрудников\n"
-            "• Отправьте `.xlsx` файл для обновления базы.\n"
-            "/add_admin [ID] — назначает пользователя с указанным Telegram ID администратором.\n"
-            "/add_employee [ID] — добавляет пользователя с указанным Telegram ID как сотрудника.\n"
-            "/staff_list — выводит список всех зарегистрированных администраторов и сотрудников."
+            "🔧 **Админ-панель**\n\n"
+            "Используйте кнопки ниже для управления ботом.\n"
+            "Доступные команды:\n"
+            "• /menu — показать меню\n"
+            "• /start — перезапуск бота",
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard()
+        )
+        return
+    
+    # Проверка на сотрудника
+    if is_staff(user_id):
+        await message.answer(
+            "👔 **Панель сотрудника**\n\n"
+            "Используйте кнопки ниже для работы с записями.\n"
+            "Доступные команды:\n"
+            "• /menu — показать меню\n"
+            "• /start — перезапуск бота",
+            parse_mode="Markdown",
+            reply_markup=get_employee_keyboard()
         )
         return
 
+    # Обычный пользователь - показываем выбор проекта
     with SessionLocal() as session:
         result = session.execute(select(Contract.house_name).distinct()).scalars().all()
         houses = [h for h in result if h]
