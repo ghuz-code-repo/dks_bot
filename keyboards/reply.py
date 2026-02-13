@@ -3,7 +3,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 # Тексты кнопок на разных языках
 BUTTON_TEXTS = {
-    'add_booking': {'ru': '📝 Добавить запись', 'uz': '📝 Yozuv qo\'shish'},
+    'add_booking': {'ru': '📝 Записаться', 'uz': '📝 ro\'yxatdan o\'tish'},
     'cancel_booking': {'ru': '❌ Отменить запись', 'uz': '❌ Yozuvni bekor qilish'},
     'my_bookings': {'ru': '📋 Мои записи', 'uz': '📋 Mening yozuvlarim'},
     'contacts': {'ru': '📞 Контакты', 'uz': '📞 Kontaktlar'},
