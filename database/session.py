@@ -55,3 +55,11 @@ def _run_migrations():
         if project_slots_columns and 'address_uz' not in project_slots_columns:
             conn.execute(text("ALTER TABLE project_slots ADD COLUMN address_uz TEXT"))
             conn.commit()
+
+        if project_slots_columns and 'latitude' not in project_slots_columns:
+            conn.execute(text("ALTER TABLE project_slots ADD COLUMN latitude TEXT"))
+            conn.commit()
+
+        if project_slots_columns and 'longitude' not in project_slots_columns:
+            conn.execute(text("ALTER TABLE project_slots ADD COLUMN longitude TEXT"))
+            conn.commit()

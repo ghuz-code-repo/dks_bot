@@ -6,7 +6,7 @@ from utils.auth import is_admin, is_staff
 import pandas as pd
 from aiogram import Bot
 from aiogram import Router, F, types
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile
 from sqlalchemy import select
@@ -31,11 +31,72 @@ class IsAdminFilter(BaseFilter):
     async def __call__(self, event: types.Message | types.CallbackQuery) -> bool:
         # Поддержка как Message, так и CallbackQuery
         user_id = event.from_user.id
-        return is_admin(user_id)
+        result = is_admin(user_id)
+        if isinstance(event, types.CallbackQuery):
+            print(f"[IsAdminFilter] callback_query user={user_id}, is_admin={result}, data={event.data}")
+        return result
 
 
 router.message.filter(IsAdminFilter())
 router.callback_query.filter(IsAdminFilter())  # Применяем фильтр и к inline кнопкам
+
+
+# Список кнопок главного меню администратора (для сброса состояния)
+ADMIN_MENU_BUTTONS = [
+    "👥 Управление персоналом", "⚙️ Настройки проектов",
+    "📊 Выгрузить отчет", "📋 Список записей",
+    "➕ Добавление проектов", "🏠 Список проектов",
+    "🔙 Скрыть меню", "📝 Установить лимит для проекта",
+    "📍 Установить адрес проекта", "🗺 Установить координаты проекта",
+    "📊 Текущие настройки проектов", "◀️ Назад",
+    "➕ Добавить администратора", "➕ Добавить сотрудника",
+    "📋 Список персонала", "❌ Удалить из персонала"
+]
+
+
+# Обработчик для кнопок меню при активном состоянии - очищает состояние и перенаправляет
+@router.message(StateFilter(AdminSteps), F.text.in_(ADMIN_MENU_BUTTONS))
+async def reset_state_on_menu_button(message: types.Message, state: FSMContext):
+    """Сброс состояния при нажатии кнопки меню и перенаправление"""
+    await state.clear()
+    
+    # Перенаправляем на соответствующий обработчик
+    text = message.text
+    
+    if text == "👥 Управление персоналом":
+        await message.answer("👥 Управление персоналом\n\nВыберите действие:", reply_markup=get_staff_management_keyboard())
+    elif text == "⚙️ Настройки проектов":
+        await message.answer("⚙️ Настройки проектов\n\nВыберите действие:", reply_markup=get_slots_management_keyboard())
+    elif text == "◀️ Назад":
+        await message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+    elif text == "📊 Текущие настройки проектов":
+        await show_project_settings(message)
+    elif text == "📝 Установить лимит для проекта":
+        await start_set_project_slots(message, state)
+    elif text == "📍 Установить адрес проекта":
+        await start_set_project_address(message, state)
+    elif text == "🗺 Установить координаты проекта":
+        await start_set_project_coordinates(message, state)
+    elif text == "➕ Добавление проектов":
+        await start_add_project(message, state)
+    elif text == "🏠 Список проектов":
+        await show_projects_list(message)
+    elif text == "📊 Выгрузить отчет":
+        await export_report(message)
+    elif text == "📋 Список записей":
+        await show_bookings_list(message, state)
+    elif text == "➕ Добавить администратора":
+        await start_add_admin(message, state)
+    elif text == "➕ Добавить сотрудника":
+        await start_add_employee(message, state)
+    elif text == "📋 Список персонала":
+        await show_staff_list_button(message)
+    elif text == "❌ Удалить из персонала":
+        await start_delete_staff(message, state)
+    elif text == "🔙 Скрыть меню":
+        await hide_menu(message, state)
+    else:
+        await message.answer("Главное меню:", reply_markup=get_admin_keyboard())
 
 
 @router.message(Command("add_admin"))
@@ -223,7 +284,7 @@ async def cancel_add_admin(message: types.Message, state: FSMContext):
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
 
 
-@router.message(AdminSteps.waiting_for_admin_id)
+@router.message(AdminSteps.waiting_for_admin_id, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_add_admin(message: types.Message, state: FSMContext):
     """Обработка добавления администратора"""
     try:
@@ -260,7 +321,7 @@ async def cancel_add_employee(message: types.Message, state: FSMContext):
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
 
 
-@router.message(AdminSteps.waiting_for_employee_id)
+@router.message(AdminSteps.waiting_for_employee_id, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_add_employee(message: types.Message, state: FSMContext):
     """Обработка добавления сотрудника"""
     try:
@@ -312,7 +373,7 @@ async def cancel_delete_staff(message: types.Message, state: FSMContext):
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
 
 
-@router.message(AdminSteps.waiting_for_staff_id_to_delete)
+@router.message(AdminSteps.waiting_for_staff_id_to_delete, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_delete_staff(message: types.Message, state: FSMContext):
     """Обработка удаления из персонала"""
     try:
@@ -347,6 +408,7 @@ async def slots_management_menu(message: types.Message):
 @router.message(F.text == "📝 Установить лимит для проекта")
 async def start_set_project_slots(message: types.Message, state: FSMContext):
     """Начало установки лимита слотов для проекта"""
+    print("[DEBUG] start_set_project_slots called")
     with SessionLocal() as session:
         projects = session.execute(select(Contract.house_name).distinct()).scalars().all()
         projects = [h for h in projects if h]
@@ -371,9 +433,10 @@ async def start_set_project_slots(message: types.Message, state: FSMContext):
         )
 
 
-@router.callback_query(F.data.startswith("setslot_"), AdminSteps.selecting_project_for_slots)
+@router.callback_query(F.data.startswith("setslot_"))
 async def project_selected_for_slots(callback: types.CallbackQuery, state: FSMContext):
     """Обработка выбора проекта для установки лимита"""
+    print(f"[DEBUG] project_selected_for_slots called, data={callback.data}")
     project_name = callback.data.split("_", 1)[1]
     await state.update_data(selected_project=project_name)
     await state.set_state(AdminSteps.waiting_for_slot_limit)
@@ -397,7 +460,7 @@ async def cancel_set_slot_limit(message: types.Message, state: FSMContext):
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
 
 
-@router.message(AdminSteps.waiting_for_slot_limit)
+@router.message(AdminSteps.waiting_for_slot_limit, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_slot_limit(message: types.Message, state: FSMContext):
     """Обработка установки лимита слотов"""
     try:
@@ -491,7 +554,7 @@ async def start_set_project_address(message: types.Message, state: FSMContext):
         )
 
 
-@router.callback_query(F.data.startswith("setaddr_"), AdminSteps.selecting_project_for_address)
+@router.callback_query(F.data.startswith("setaddr_"))
 async def project_selected_for_address(callback: types.CallbackQuery, state: FSMContext):
     """Обработка выбора проекта для установки адреса"""
     project_name = callback.data.split("_", 1)[1]
@@ -527,7 +590,7 @@ async def project_selected_for_address(callback: types.CallbackQuery, state: FSM
     await callback.answer()
 
 
-@router.callback_query(F.data == "keep_current_addresses", AdminSteps.waiting_for_address_ru)
+@router.callback_query(F.data == "keep_current_addresses")
 async def keep_current_addresses(callback: types.CallbackQuery, state: FSMContext):
     """Оставить текущие адреса без изменений"""
     await state.clear()
@@ -545,7 +608,7 @@ async def cancel_set_address(message: types.Message, state: FSMContext):
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
 
 
-@router.message(AdminSteps.waiting_for_address_ru)
+@router.message(AdminSteps.waiting_for_address_ru, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_address_ru(message: types.Message, state: FSMContext):
     """Обработка адреса на русском"""
     address_ru = message.text.strip()
@@ -566,7 +629,7 @@ async def cancel_set_address_uz(message: types.Message, state: FSMContext):
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
 
 
-@router.message(AdminSteps.waiting_for_address_uz)
+@router.message(AdminSteps.waiting_for_address_uz, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_address_uz(message: types.Message, state: FSMContext):
     """Обработка адреса на узбекском и сохранение"""
     address_uz = message.text.strip()
@@ -603,6 +666,7 @@ async def process_address_uz(message: types.Message, state: FSMContext):
 @router.message(F.text == "🗺 Установить координаты проекта")
 async def start_set_project_coordinates(message: types.Message, state: FSMContext):
     """Начало установки координат для проекта"""
+    print(f"[DEBUG] start_set_project_coordinates called, user={message.from_user.id}")
     with SessionLocal() as session:
         projects = session.execute(select(Contract.house_name).distinct()).scalars().all()
         projects = [h for h in projects if h]
@@ -630,9 +694,10 @@ async def start_set_project_coordinates(message: types.Message, state: FSMContex
         )
 
 
-@router.callback_query(F.data.startswith("coord_"), AdminSteps.edit_project_select)
+@router.callback_query(F.data.startswith("coord_"))
 async def project_selected_for_coordinates(callback: types.CallbackQuery, state: FSMContext):
     """Обработка выбора проекта для установки координат"""
+    print(f"[DEBUG] project_selected_for_coordinates called, data={callback.data}")
     project_idx = int(callback.data.split("_")[1])
     user_data = await state.get_data()
     projects_list = user_data.get('projects_list', [])
@@ -670,7 +735,7 @@ async def project_selected_for_coordinates(callback: types.CallbackQuery, state:
     await callback.answer()
 
 
-@router.callback_query(F.data == "keep_current_coords", AdminSteps.edit_project_latitude)
+@router.callback_query(F.data == "keep_current_coords")
 async def keep_current_coordinates(callback: types.CallbackQuery, state: FSMContext):
     """Оставить текущие координаты без изменений"""
     await state.clear()
@@ -688,7 +753,7 @@ async def cancel_set_coordinates(message: types.Message, state: FSMContext):
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
 
 
-@router.message(AdminSteps.edit_project_latitude)
+@router.message(AdminSteps.edit_project_latitude, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_project_latitude_edit(message: types.Message, state: FSMContext):
     """Обработка широты для проекта"""
     try:
@@ -721,7 +786,7 @@ async def cancel_set_longitude(message: types.Message, state: FSMContext):
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
 
 
-@router.message(AdminSteps.edit_project_longitude)
+@router.message(AdminSteps.edit_project_longitude, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_project_longitude_edit(message: types.Message, state: FSMContext):
     """Обработка долготы и сохранение координат"""
     try:
@@ -774,43 +839,99 @@ async def export_report_button(message: types.Message):
 
 
 @router.message(F.text == "📋 Список записей")
-async def show_bookings_list(message: types.Message):
-    """Показать список ближайших записей"""
+async def show_bookings_list(message: types.Message, state: FSMContext):
+    """Показать выбор проекта для просмотра записей"""
+    with SessionLocal() as session:
+        projects = session.execute(select(Contract.house_name).distinct()).scalars().all()
+        projects = [h for h in projects if h]
+
+    if not projects:
+        return await message.answer("❌ В базе нет проектов.", reply_markup=get_admin_keyboard())
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    for project in projects:
+        builder.button(text=project, callback_data=f"bookings_{project[:40]}")
+    builder.adjust(1)
+
+    await state.set_state(AdminSteps.selecting_project_for_bookings)
+    await message.answer(
+        "📋 Выберите проект для просмотра записей:",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("bookings_"))
+async def show_bookings_for_project(callback: types.CallbackQuery, state: FSMContext):
+    """Показать записи по выбранному проекту"""
     from datetime import date, timedelta
-    
+
+    project_name = callback.data.split("_", 1)[1]
+    await state.clear()
+
     with SessionLocal() as session:
         today = date.today()
         week_later = today + timedelta(days=7)
-        
+
         bookings = (
             session.query(Booking, Contract)
             .join(Contract, Booking.contract_id == Contract.id)
             .filter(
-                Booking.date >= today, 
+                Booking.date >= today,
                 Booking.date <= week_later,
-                Booking.is_cancelled == False
+                Booking.is_cancelled == False,
+                Contract.house_name == project_name
             )
             .order_by(Booking.date, Booking.time_slot)
             .all()
         )
-        
+
         if not bookings:
-            return await message.answer("📋 На ближайшую неделю записей нет.", reply_markup=get_admin_keyboard())
-        
-        text = "📋 **Записи на ближайшую неделю:**\n\n"
+            await callback.message.edit_text(
+                f"📋 По проекту **{project_name}** записей на ближайшую неделю нет.",
+                parse_mode="Markdown"
+            )
+            await callback.message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+            await callback.answer()
+            return
+
+        text = f"📋 **{project_name}** — записи на неделю:\n"
         current_date = None
-        
+
         for booking, contract in bookings:
             if booking.date != current_date:
                 current_date = booking.date
-                text += f"\n📅 **{booking.date.strftime('%d.%m.%Y')}**\n"
-            
+                text += f"\n📅 **{booking.date.strftime('%d.%m')}**\n"
+
             text += (
-                f"🕐 {booking.time_slot.strftime('%H:%M')} — "
-                f"{contract.client_fio} ({contract.house_name}, кв.{contract.apt_num})\n"
+                f"{booking.time_slot.strftime('%H:%M')}"
+                f" | кв.{contract.apt_num}"
+                f" | {contract.contract_num}\n"
             )
-        
-        await message.answer(text, parse_mode="Markdown", reply_markup=get_admin_keyboard())
+
+    # Разбиваем на части если текст слишком длинный
+    MAX_LEN = 4000
+    if len(text) <= MAX_LEN:
+        await callback.message.edit_text(text, parse_mode="Markdown")
+    else:
+        await callback.message.delete()
+        # Отправляем частями
+        parts = []
+        current_part = ""
+        for line in text.split("\n"):
+            if len(current_part) + len(line) + 1 > MAX_LEN:
+                parts.append(current_part)
+                current_part = line + "\n"
+            else:
+                current_part += line + "\n"
+        if current_part.strip():
+            parts.append(current_part)
+
+        for part in parts:
+            await callback.message.answer(part, parse_mode="Markdown")
+
+    await callback.message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+    await callback.answer()
 
 
 @router.message(F.text == "🏠 Список проектов")
@@ -846,7 +967,7 @@ async def start_add_project(message: types.Message, state: FSMContext):
     )
 
 
-@router.message(AdminSteps.add_project_address_ru)
+@router.message(AdminSteps.add_project_address_ru, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_project_address_ru(message: types.Message, state: FSMContext):
     """Обработка адреса на русском"""
     if message.text == "❌ Отменить":
@@ -861,7 +982,7 @@ async def process_project_address_ru(message: types.Message, state: FSMContext):
     )
 
 
-@router.message(AdminSteps.add_project_address_uz)
+@router.message(AdminSteps.add_project_address_uz, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_project_address_uz(message: types.Message, state: FSMContext):
     """Обработка адреса на узбекском"""
     if message.text == "❌ Отменить":
@@ -877,7 +998,7 @@ async def process_project_address_uz(message: types.Message, state: FSMContext):
     )
 
 
-@router.message(AdminSteps.add_project_slots_limit)
+@router.message(AdminSteps.add_project_slots_limit, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_project_slots_limit(message: types.Message, state: FSMContext):
     """Обработка лимита слотов"""
     if message.text == "❌ Отменить":
@@ -941,7 +1062,7 @@ async def use_default_coordinates(callback: types.CallbackQuery, state: FSMConte
     await callback.answer()
 
 
-@router.message(AdminSteps.add_project_latitude)
+@router.message(AdminSteps.add_project_latitude, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_project_latitude(message: types.Message, state: FSMContext):
     """Обработка широты"""
     if message.text == "❌ Отменить":
@@ -964,7 +1085,7 @@ async def process_project_latitude(message: types.Message, state: FSMContext):
         await message.answer("⚠️ Введите число (можно с десятичной точкой):")
 
 
-@router.message(AdminSteps.add_project_longitude)
+@router.message(AdminSteps.add_project_longitude, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_project_longitude(message: types.Message, state: FSMContext):
     """Обработка долготы"""
     if message.text == "❌ Отменить":

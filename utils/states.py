@@ -37,6 +37,9 @@ class AdminSteps(StatesGroup):
     add_project_longitude = State()
     add_project_excel = State()
     
+    # Просмотр записей по проекту
+    selecting_project_for_bookings = State()
+
     # Редактирование настроек проекта
     edit_project_select = State()
     edit_project_action = State()

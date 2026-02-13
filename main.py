@@ -46,8 +46,8 @@ class DisabledSSLAiohttpSession(AiohttpSession):
 
 async def main():
     # 3. ЖЕСТКАЯ НАСТРОЙКА ЛОГИРОВАНИЯ
-    # Отключаем все логи ниже уровня CRITICAL для сторонних библиотек
-    logging.getLogger("aiogram").setLevel(logging.CRITICAL)
+    # Временно включаем логирование aiogram для отладки
+    logging.getLogger("aiogram").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
     logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
@@ -59,6 +59,24 @@ async def main():
     session = DisabledSSLAiohttpSession()
     bot = Bot(token=BOT_TOKEN, session=session)
     dp = Dispatcher()
+
+    # Middleware для отладки callback_query
+    from aiogram import BaseMiddleware
+    class DebugCallbackMiddleware(BaseMiddleware):
+        async def __call__(self, handler, event, data):
+            if hasattr(event, 'data'):
+                print(f"[MIDDLEWARE] callback_query received: user={event.from_user.id}, data={event.data}")
+            try:
+                result = await handler(event, data)
+                if hasattr(event, 'data'):
+                    print(f"[MIDDLEWARE] callback_query handled successfully: data={event.data}")
+                return result
+            except Exception as e:
+                if hasattr(event, 'data'):
+                    print(f"[MIDDLEWARE] callback_query ERROR: data={event.data}, error={e}")
+                raise
+
+    dp.callback_query.outer_middleware(DebugCallbackMiddleware())
 
     dp.include_router(admin.router)
     dp.include_router(employee.router)  # Роутер для сотрудников
