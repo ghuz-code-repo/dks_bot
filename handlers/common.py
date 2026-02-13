@@ -44,7 +44,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
         return
 
     # Обычный пользователь - показываем клавиатуру клиента
-    lang = get_user_language(user_id)
+    lang_code = message.from_user.language_code
+    lang = get_user_language(user_id, language_code=lang_code)
     welcome_text = get_message('welcome', lang)
 
     await message.answer(welcome_text, reply_markup=get_client_keyboard(lang))

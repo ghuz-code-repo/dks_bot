@@ -5,13 +5,26 @@ from database.models import UserLanguage
 from database.session import SessionLocal
 
 
-def get_user_language(telegram_id: int) -> str:
-    """Получить язык пользователя (по умолчанию 'ru')"""
+def get_user_language(telegram_id: int, language_code: str = None) -> str:
+    """Получить язык пользователя. Для новых пользователей определяет по language_code Telegram."""
     with SessionLocal() as session:
         user_lang = session.query(UserLanguage).filter(
             UserLanguage.telegram_id == telegram_id
         ).first()
-        return user_lang.language if user_lang else 'ru'
+        if user_lang:
+            return user_lang.language
+        
+        # Новый пользователь — определяем язык из Telegram
+        if language_code and language_code.startswith('uz'):
+            lang = 'uz'
+        else:
+            lang = 'ru'
+        
+        # Сохраняем выбор
+        new_user = UserLanguage(telegram_id=telegram_id, language=lang)
+        session.add(new_user)
+        session.commit()
+        return lang
 
 
 def set_user_language(telegram_id: int, language: str) -> None:
