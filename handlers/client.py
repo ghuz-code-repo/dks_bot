@@ -23,8 +23,8 @@ router = Router()
 # Адреса по умолчанию (используются только для раздела "Контакты")
 DEFAULT_ADDRESS_RU = "г. Ташкент, Яшнабадский район, ул. Фаргона йули 27 (O'Z Zamin)"
 DEFAULT_ADDRESS_UZ = "Toshkent sh., Yashnobod tumani, Farg'ona yo'li ko'chasi 27 (O'Z Zamin)"
-OFFICE_LAT = 41.281067
-OFFICE_LON = 69.306903
+OFFICE_LAT = DKS_CONTACTS.get("latitude", 41.302006)
+OFFICE_LON = DKS_CONTACTS.get("longitude", 69.292259)
 OFFICE_PHONE = "+998781485115"
 
 

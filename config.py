@@ -14,5 +14,7 @@ DKS_CONTACTS = {
     "address_ru": "г. Ташкент, улица Истикбол, 39Б",
     "address_uz": "Toshkent sh., Istiqbol ko'chasi, 39B",
     "working_hours_ru": "Пн-Пт: 9:00-18:00",
-    "working_hours_uz": "Dush-Jum: 9:00-18:00"
+    "working_hours_uz": "Dush-Jum: 9:00-18:00",
+    "latitude": 41.302006,     
+    "longitude": 69.292259
 }
