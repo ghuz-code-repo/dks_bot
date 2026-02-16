@@ -3,20 +3,22 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 # Тексты кнопок на разных языках
 BUTTON_TEXTS = {
-    'add_booking': {'ru': '📝 Записаться', 'uz': '📝 ro\'yxatdan o\'tish'},
+    'add_booking': {'ru': '📝 Первичная запись', 'uz': '📝 Uchrashuv belgilash'},
     'cancel_booking': {'ru': '❌ Отменить запись', 'uz': '❌ Yozuvni bekor qilish'},
     'my_bookings': {'ru': '📋 Мои записи', 'uz': '📋 Mening yozuvlarim'},
+    'view_calendar': {'ru': '📅 Перезаписаться', 'uz': '📅 Uchrashuvni ko\'chirish'},
     'contacts': {'ru': '📞 Контакты', 'uz': '📞 Kontaktlar'},
     'language': {'ru': '🌐 O\'zbek tili', 'uz': '🌐 Русский язык'},
 }
 
 
 def get_client_keyboard(lang: str = 'ru') -> ReplyKeyboardMarkup:
-    """Клавиатура для клиента с учетом языка (1+2x2)"""
+    """Клавиатура для клиента с учетом языка"""
     keyboard = [
         [KeyboardButton(text=BUTTON_TEXTS['language'][lang])],
         [KeyboardButton(text=BUTTON_TEXTS['add_booking'][lang]), KeyboardButton(text=BUTTON_TEXTS['cancel_booking'][lang])],
-        [KeyboardButton(text=BUTTON_TEXTS['my_bookings'][lang]), KeyboardButton(text=BUTTON_TEXTS['contacts'][lang])]
+        [KeyboardButton(text=BUTTON_TEXTS['my_bookings'][lang]), KeyboardButton(text=BUTTON_TEXTS['view_calendar'][lang])],
+        [KeyboardButton(text=BUTTON_TEXTS['contacts'][lang])]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 

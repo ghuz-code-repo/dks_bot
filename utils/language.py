@@ -261,6 +261,37 @@ MESSAGES = {
         'ru': '❌ В данный момент нет доступных жилых комплексов для записи.',
         'uz': '❌ Hozirda yozuv uchun mavjud turar-joy majmualari yo\'q.'
     },
+
+    # Календарь записей
+    'no_active_bookings_rebook': {
+        'ru': '❌ У вас нет активных записей для перезаписи.\nСначала запишитесь через кнопку «📝 Первичная запись».',
+        'uz': '❌ Sizda qayta yozish uchun faol yozuvlar yo\'q.\nAvval «📝 Uchrashuv belgilash» tugmasi orqali yozing.'
+    },
+    'select_booking_rebook': {
+        'ru': '📋 Выберите запись, которую хотите перезаписать:',
+        'uz': '📋 Qayta yozmoqchi bo\'lgan yozuvni tanlang:'
+    },
+    'calendar_header': {
+        'ru': '📅 Календарь доступных дат для записи\n🏠 ЖК: {house}\n\nВыберите дату для записи:',
+        'uz': '📅 Yozuv uchun mavjud sanalar taqvimi\n🏠 TJM: {house}\n\nYozuv uchun sanani tanlang:'
+    },
+    'rebook_confirm': {
+        'ru': '⚠️ У вас уже есть активная запись:\n\n📅 Дата: {old_date}\n⏰ Время: {old_time}\n🏠 ЖК: {house}\n🏢 Кв: {apt}\n\nВы выбрали новую запись: **{new_date} {new_time}**\nДля этого необходимо отменить текущую запись.\n\nОтменить текущую запись и перезаписаться?',
+        'uz': '⚠️ Sizda allaqachon faol yozuv mavjud:\n\n📅 Sana: {old_date}\n⏰ Vaqt: {old_time}\n🏠 TJM: {house}\n🏢 Kv: {apt}\n\nSiz yangi yozuvni tanladingiz: **{new_date} {new_time}**\nBuning uchun joriy yozuvni bekor qilish kerak.\n\nJoriy yozuvni bekor qilib, qayta yozilasizmi?'
+    },
+    'rebook_confirm_yes': {
+        'ru': '✅ Да, перезаписаться',
+        'uz': '✅ Ha, qayta yozilish'
+    },
+    'rebook_confirm_no': {
+        'ru': '❌ Нет, оставить текущую',
+        'uz': '❌ Yo\'q, joriyni qoldirish'
+    },
+    'rebook_cancelled': {
+        'ru': '❌ Перезапись отменена. Ваша текущая запись сохранена.',
+        'uz': '❌ Qayta yozilish bekor qilindi. Joriy yozuvingiz saqlandi.'
+    },
+
 }
 
 

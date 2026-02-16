@@ -1,11 +1,67 @@
+import logging
 import pandas as pd
 from database.session import SessionLocal
 from database.models import Contract, ProjectSlots
 from datetime import datetime
 
+# Ожидаемые названия столбцов в правильном порядке
+EXPECTED_COLUMNS = [
+    'Название дома',
+    'Номер квартиры',
+    'Подъезд',
+    'Этаж',
+    'Номер договора',
+    'ФИО клиента',
+    'Дата сдачи',
+]
+
+
+def _detect_columns(df):
+    """
+    Определяет маппинг столбцов.
+
+    1) Если все ожидаемые заголовки присутствуют — используем их по именам.
+    2) Иначе — считаем, что столбцы расположены позиционно в порядке EXPECTED_COLUMNS.
+
+    Returns:
+        dict: маппинг логическое_имя -> реальное имя столбца в DataFrame
+    """
+    stripped = [c.strip() for c in df.columns]
+    df.columns = stripped
+
+    missing = [col for col in EXPECTED_COLUMNS if col not in stripped]
+
+    if not missing:
+        # Все заголовки найдены — используем по именам
+        logging.info("Excel: все ожидаемые заголовки найдены, используем по именам.")
+        return {col: col for col in EXPECTED_COLUMNS}, df
+
+    # Фолбэк: позиционный доступ
+    if len(df.columns) < len(EXPECTED_COLUMNS):
+        raise ValueError(
+            f"В файле {len(df.columns)} столбцов, ожидается минимум {len(EXPECTED_COLUMNS)}. "
+            f"Ожидаемый порядок: {', '.join(EXPECTED_COLUMNS)}"
+        )
+
+    logging.info(
+        "Excel: заголовки не совпадают (отсутствуют: %s). Используем позиционный порядок столбцов.",
+        ', '.join(missing),
+    )
+    mapping = {}
+    for idx, expected_name in enumerate(EXPECTED_COLUMNS):
+        mapping[expected_name] = df.columns[idx]
+    return mapping, df
+
+
 def process_excel_file(file_path, project_name=None, address_ru=None, address_uz=None, slots_limit=None, latitude=None, longitude=None):
     """
     Импорт контрактов из Excel.
+    
+    Логика определения столбцов:
+      1) Если заголовки в файле совпадают с ожидаемыми — данные читаются по именам столбцов.
+      2) Если хотя бы один заголовок не совпадает — данные читаются позиционно,
+         в порядке: Название дома, Номер квартиры, Подъезд, Этаж, Номер договора,
+         ФИО клиента, Дата сдачи.
     
     Args:
         file_path: путь к Excel файлу
@@ -19,25 +75,24 @@ def process_excel_file(file_path, project_name=None, address_ru=None, address_uz
     Returns:
         tuple: (количество импортированных контрактов, название проекта)
     """
-    # Указываем формат даты, если он специфический, или полагаемся на автоопределение
     df = pd.read_excel(file_path)
-    df.columns = [c.strip() for c in df.columns]
+    col_map, df = _detect_columns(df)
 
     count = 0
     detected_project = None
     
     with SessionLocal() as session:
         for _, row in df.iterrows():
-            clean_contract = "".join(str(row['Номер договора']).split()).upper()
+            clean_contract = "".join(str(row[col_map['Номер договора']]).split()).upper()
 
             # Преобразование даты сдачи
-            raw_delivery_date = row['Дата сдачи']
+            raw_delivery_date = row[col_map['Дата сдачи']]
             if isinstance(raw_delivery_date, str):
                 delivery_date = datetime.strptime(raw_delivery_date, '%d.%m.%Y').date()
             else:
                 delivery_date = raw_delivery_date.date()
 
-            house_name = str(row['Название дома'])
+            house_name = str(row[col_map['Название дома']])
             
             # Определяем название проекта
             if detected_project is None:
@@ -51,11 +106,11 @@ def process_excel_file(file_path, project_name=None, address_ru=None, address_uz
 
             data = {
                 "house_name": house_name,
-                "apt_num": str(row['Номер квартиры']),
-                "entrance": str(row['Подьезд']),
-                "floor": int(row['Этаж']),
+                "apt_num": str(row[col_map['Номер квартиры']]),
+                "entrance": str(row[col_map['Подъезд']]),
+                "floor": int(row[col_map['Этаж']]),
                 "contract_num": clean_contract,
-                "client_fio": str(row['ФИО клиента']),
+                "client_fio": str(row[col_map['ФИО клиента']]),
                 "delivery_date": delivery_date
             }
 

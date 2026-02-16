@@ -1049,7 +1049,7 @@ async def use_default_coordinates(callback: types.CallbackQuery, state: FSMConte
         
         await callback.message.answer(
             "Теперь отправьте Excel-файл с контрактами.\n\n"
-            "Файл должен содержать колонки:\n"
+            "Файл должен содержать первой строкой названия колонок ,в следующем порядке:\n"
             "• Название дома\n"
             "• Номер квартиры\n"
             "• Подъезд\n"
@@ -1101,7 +1101,7 @@ async def process_project_longitude(message: types.Message, state: FSMContext):
         await state.set_state(AdminSteps.add_project_excel)
         await message.answer(
             "Теперь отправьте Excel-файл с контрактами.\n\n"
-            "Файл должен содержать колонки:\n"
+            "Файл должен содержать первой строкой названия колонок ,в следующем порядке:\n"
             "• Название дома\n"
             "• Номер квартиры\n"
             "• Подъезд\n"

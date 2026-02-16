@@ -11,6 +11,13 @@ class ClientSteps(StatesGroup):
     # Флоу отмены записи
     cancel_selecting_booking = State()
     cancel_confirming = State()
+    
+    # Флоу перезаписи
+    calendar_selecting_booking = State()
+    calendar_viewing = State()
+    calendar_selecting_time = State()
+    calendar_rebook_confirming = State()
+    calendar_entering_phone = State()
 
 
 class AdminSteps(StatesGroup):
