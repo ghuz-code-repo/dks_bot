@@ -984,21 +984,29 @@ def _build_update_contracts_keyboard(analysis, selected=None):
     if analysis["updated_contracts"]:
         count = len(analysis["updated_contracts"])
         options.append(("update", f"Подтвердить обновление ({count})"))
-    if analysis["changed_contracts"]:
-        count = len(analysis["changed_contracts"])
-        options.append(("change", f"Подтвердить смену договоров ({count})"))
-
     for key, label in options:
         prefix = "✅" if key in selected else "☐"
         builder.button(text=f"{prefix} {label}", callback_data=f"ucsel_{key}")
 
+    # Смена договоров — два взаимоисключающих варианта (радиокнопки)
+    change_options = []
+    if analysis["changed_contracts"]:
+        count = len(analysis["changed_contracts"])
+        change_options.append(("change_notify", f"Смена договоров с уведомлением ({count})"))
+        change_options.append(("change_silent", f"Смена договоров без уведомления ({count})"))
+
+    for key, label in change_options:
+        prefix = "🔘" if key in selected else "○"
+        builder.button(text=f"{prefix} {label}", callback_data=f"ucsel_{key}")
+
+    total_options = len(options) + len(change_options)
     if selected:
         builder.button(text="▶️ Продолжить", callback_data="uc_proceed")
     else:
         builder.button(text="▫️ Выберите действие", callback_data="uc_noop")
     builder.button(text="❌ Отменить", callback_data="uc_cancel")
 
-    rows = [1] * len(options) + [2]
+    rows = [1] * total_options + [2]
     builder.adjust(*rows)
     return builder
 
@@ -1011,10 +1019,19 @@ async def update_contracts_toggle(callback: types.CallbackQuery, state: FSMConte
     selected = set(data.get("uc_selected", []))
     analysis = data["uc_analysis"]
 
-    if action in selected:
-        selected.discard(action)
+    # change_notify и change_silent — взаимоисключающие (радиокнопки)
+    if action in ("change_notify", "change_silent"):
+        other = "change_silent" if action == "change_notify" else "change_notify"
+        selected.discard(other)
+        if action in selected:
+            selected.discard(action)
+        else:
+            selected.add(action)
     else:
-        selected.add(action)
+        if action in selected:
+            selected.discard(action)
+        else:
+            selected.add(action)
 
     await state.update_data(uc_selected=list(selected))
     builder = _build_update_contracts_keyboard(analysis, selected)
@@ -1047,15 +1064,20 @@ async def update_contracts_proceed(callback: types.CallbackQuery, state: FSMCont
     await callback.message.edit_text("⏳ Применение изменений...")
 
     try:
+        apply_changed = "change_notify" in selected or "change_silent" in selected
+        send_notifications = "change_notify" in selected
+
         result = apply_contract_changes(
             analysis,
             apply_new="add" in selected,
             apply_updates="update" in selected,
-            apply_changed="change" in selected,
+            apply_changed=apply_changed,
         )
 
-        # Отправляем уведомления клиентам
+        # Отправляем уведомления клиентам (только если выбрано "с уведомлением")
         notification_count = 0
+        if not send_notifications:
+            result["notifications"] = []
         for telegram_id in result["notifications"]:
             try:
                 await bot.send_message(
