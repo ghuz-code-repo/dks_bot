@@ -14,11 +14,7 @@ from aiogram.fsm.state import State
 class TestClientSteps:
     """Тесты для состояний клиента"""
     
-    def test_selecting_house_state_exists(self):
-        """Состояние selecting_house существует"""
-        assert hasattr(ClientSteps, 'selecting_house')
-        assert isinstance(ClientSteps.selecting_house, State)
-    
+
     def test_entering_contract_state_exists(self):
         """Состояние entering_contract существует"""
         assert hasattr(ClientSteps, 'entering_contract')
@@ -42,18 +38,16 @@ class TestClientSteps:
     def test_all_states_count(self):
         """Проверка количества состояний"""
         states = [
-            ClientSteps.selecting_house,
             ClientSteps.entering_contract,
             ClientSteps.selecting_date,
             ClientSteps.selecting_time,
             ClientSteps.entering_phone
         ]
-        assert len(states) == 5
+        assert len(states) == 4
     
     def test_states_are_unique(self):
         """Все состояния уникальны"""
         states = [
-            str(ClientSteps.selecting_house),
             str(ClientSteps.entering_contract),
             str(ClientSteps.selecting_date),
             str(ClientSteps.selecting_time),

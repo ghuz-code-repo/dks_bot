@@ -7,12 +7,11 @@ from aiogram import Router, F, types, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.types import ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select, func, or_
+from sqlalchemy import func, or_
 
 from config import ADMIN_ID, DKS_CONTACTS
 from database.models import Booking, Setting, Contract, Staff, ProjectSlots
 from database.session import SessionLocal
-from keyboards import inline
 from keyboards.inline import generate_time_slots, generate_calendar, get_min_booking_date, get_fully_booked_dates, SLOTS_PER_DAY
 from keyboards.reply import get_phone_request_keyboard, get_client_keyboard, BUTTON_TEXTS
 from utils.states import ClientSteps
@@ -131,26 +130,14 @@ def can_cancel_booking(booking_date: date) -> bool:
 
 @router.message(F.text.in_([BUTTON_TEXTS['add_booking']['ru'], BUTTON_TEXTS['add_booking']['uz']]))
 async def add_booking_button(message: types.Message, state: FSMContext):
-    """Начало процесса добавления записи"""
+    """Начало процесса добавления записи — сразу запрашиваем номер договора"""
     await state.clear()
     user_id = message.from_user.id
     lang = get_user_language(user_id)
-    
-    with SessionLocal() as session:
-        houses = session.execute(select(Contract.house_name).distinct()).scalars().all()
-        houses = [h for h in houses if h]
 
-    if not houses:
-        await message.answer(
-            get_message('no_houses_available', lang),
-            reply_markup=get_client_keyboard(lang)
-        )
-        return
-
-    await state.set_state(ClientSteps.selecting_house)
+    await state.set_state(ClientSteps.entering_contract)
     await message.answer(
-        get_message('select_house', lang),
-        reply_markup=inline.generate_houses_kb(houses)
+        get_message('enter_contract', lang)
     )
 
 
@@ -1277,50 +1264,18 @@ async def confirm_cancel_booking(callback: types.CallbackQuery, state: FSMContex
 
 # ========== ОСНОВНОЙ ФЛОУ ЗАПИСИ ==========
 
-@router.message(F.text == "/start")
-async def client_start(message: types.Message, state: FSMContext):
-    with SessionLocal() as session:
-        houses = session.execute(select(Contract.house_name).distinct()).scalars().all()
 
-    if not houses:
-        await message.answer("В базе пока нет доступных объектов.")
-        return
-
-    await state.set_state(ClientSteps.selecting_house)
-    await message.answer(
-        "Выберите дом, в котором вы приобрели квартиру:",
-        reply_markup=inline.generate_houses_kb(houses)
-    )
-
-
-@router.callback_query(F.data.startswith("house_"))
-async def house_selected(callback: types.CallbackQuery, state: FSMContext):
-    house_name = callback.data.split("_", 1)[1]
-    user_id = callback.from_user.id
-    lang = get_user_language(user_id)
-    await state.update_data(selected_house=house_name, lang=lang)
-    await state.set_state(ClientSteps.entering_contract)
-
-    object_label = "Obyekt" if lang == 'uz' else "Объект"
-    await callback.message.edit_text(
-        f"🏘 {object_label}: **{house_name}**\n\n{get_message('enter_contract', lang)}",
-        parse_mode="Markdown"
-    )
-    await callback.answer()
 
 
 @router.message(ClientSteps.entering_contract)
 async def contract_entered(message: types.Message, state: FSMContext):
     user_contract = message.text.replace(" ", "").upper()
-    data = await state.get_data()
-    selected_house = data.get('selected_house')
     user_id = message.from_user.id
     lang = get_user_language(user_id)
 
     with SessionLocal() as session:
         contract = session.query(Contract).filter(
-            Contract.contract_num == user_contract,
-            Contract.house_name == selected_house
+            Contract.contract_num == user_contract
         ).first()
 
         # Если договор НЕ найден - просим ввести заново
@@ -1463,6 +1418,7 @@ async def contract_entered(message: types.Message, state: FSMContext):
             client_fio=contract.client_fio,
             apt_num=contract.apt_num,
             house_name=contract.house_name,
+            selected_house=contract.house_name,
             delivery_date=min_booking_date.isoformat(),
             slots_limit=slots_limit
         )

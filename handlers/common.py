@@ -5,8 +5,6 @@ from sqlalchemy import select
 from config import ADMIN_ID
 from database.session import SessionLocal
 from database.models import Contract
-from utils.states import ClientSteps
-from keyboards.inline import generate_houses_kb
 from keyboards.reply import get_admin_keyboard, get_employee_keyboard, get_client_keyboard
 from utils.auth import is_admin, is_staff
 from utils.language import get_user_language, get_message

@@ -2,7 +2,6 @@ from aiogram.fsm.state import StatesGroup, State
 
 class ClientSteps(StatesGroup):
     # Основной флоу добавления записи
-    selecting_house = State()
     entering_contract = State()
     selecting_date = State()
     selecting_time = State()

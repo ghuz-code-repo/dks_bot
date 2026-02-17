@@ -243,26 +243,6 @@ class TestClientHandlers:
     
     @pytest.mark.asyncio
     @patch('handlers.client.get_user_language')
-    async def test_house_selected(self, mock_get_lang):
-        """Выбор дома"""
-        from handlers.client import house_selected
-        
-        mock_get_lang.return_value = 'ru'
-        
-        mock_callback = AsyncMock()
-        mock_callback.data = "house_ЖК Навои"
-        mock_callback.from_user.id = 123456789
-        mock_callback.message = AsyncMock()
-        
-        mock_state = AsyncMock()
-        
-        await house_selected(mock_callback, mock_state)
-        
-        mock_state.update_data.assert_called()
-        mock_callback.answer.assert_called()
-    
-    @pytest.mark.asyncio
-    @patch('handlers.client.get_user_language')
     @patch('handlers.client.SessionLocal')
     async def test_contract_not_found(self, mock_session, mock_get_lang):
         """Договор не найден"""
@@ -275,7 +255,6 @@ class TestClientHandlers:
         mock_message.from_user.id = 123456789
         
         mock_state = AsyncMock()
-        mock_state.get_data.return_value = {'selected_house': 'ЖК Навои'}
         
         mock_session_instance = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_session_instance

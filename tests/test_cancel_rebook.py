@@ -322,7 +322,7 @@ class TestContractEnteredAfterCancellation:
             captured_data.update(kwargs)
 
         mock_state = AsyncMock()
-        mock_state.get_data = AsyncMock(return_value={"selected_house": "ЖК Тест"})
+        mock_state.get_data = AsyncMock(return_value={})
         mock_state.update_data = capture_update_data
 
         with patch("handlers.client.SessionLocal", Factory):
@@ -387,7 +387,7 @@ class TestContractEnteredAfterCancellation:
             captured_data.update(kwargs)
 
         mock_state = AsyncMock()
-        mock_state.get_data = AsyncMock(return_value={"selected_house": "ЖК Тест2"})
+        mock_state.get_data = AsyncMock(return_value={})
         mock_state.update_data = capture_update_data
 
         with patch("handlers.client.SessionLocal", Factory):
