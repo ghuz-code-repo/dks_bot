@@ -7,3 +7,9 @@ keyboards/__pycache__/*
 
 tests/__pycache__/*
 __pycache__/*
+compare_bookings.py
+compare_deep.py
+debug_parse.py
+find_client.py
+data_test/comparison_result.xlsx
+data_test/result.json

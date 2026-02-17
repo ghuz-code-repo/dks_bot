@@ -117,14 +117,14 @@ class TestGetMinBookingDate:
             result = get_min_booking_date()
             assert result == date(2026, 2, 2)  # Понедельник
     
-    def test_after_noon_friday_returns_tuesday(self):
-        """Пятница 12:01 -> Вторник (пропускает понедельник)"""
+    def test_after_noon_friday_returns_monday(self):
+        """Пятница 12:01 -> Понедельник (пятница весь день — запись на понедельник)"""
         mock_time = datetime(2026, 1, 30, 12, 1)  # Пятница 12:01
         with patch('keyboards.inline.datetime') as mock_datetime:
             mock_datetime.now.return_value = mock_time
             mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
             result = get_min_booking_date()
-            assert result == date(2026, 2, 3)  # Вторник
+            assert result == date(2026, 2, 2)  # Понедельник
     
     def test_exactly_noon_returns_next_working_day(self):
         """Ровно 12:00 -> следующий рабочий день (граница)"""
@@ -137,13 +137,13 @@ class TestGetMinBookingDate:
             assert result == date(2026, 1, 30)  # Пятница
     
     def test_saturday_before_noon(self):
-        """Суббота 10:00 -> Понедельник"""
+        """Суббота 10:00 -> Вторник"""
         mock_time = datetime(2026, 1, 31, 10, 0)  # Суббота 10:00
         with patch('keyboards.inline.datetime') as mock_datetime:
             mock_datetime.now.return_value = mock_time
             mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
             result = get_min_booking_date()
-            assert result == date(2026, 2, 2)  # Понедельник
+            assert result == date(2026, 2, 3)  # Вторник
     
     def test_saturday_after_noon(self):
         """Суббота 14:00 -> Вторник"""

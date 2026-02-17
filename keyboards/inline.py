@@ -22,8 +22,8 @@ def get_next_working_day(from_date: date) -> date:
 def get_min_booking_date() -> date:
     """
     Рассчитывает минимальную дату для записи:
-    - Суббота/воскресенье (любое время) — вторник
     - Пятница (любое время) — понедельник
+    - Суббота/воскресенье (любое время) — вторник
     - Пн-Чт: до 12:00 — следующий рабочий день, после 12:00 — через один рабочий день
     
     ВАЖНО: Используется время по Ташкенту (UTC+5)
@@ -34,21 +34,18 @@ def get_min_booking_date() -> date:
     current_weekday = today.weekday()  # 0=Пн, 4=Пт, 5=Сб, 6=Вс
     cutoff_hour = 12  # Граница — 12:00
     
-    # Суббота или воскресенье - всегда вторник
-    if current_weekday >= 5:  # 5=Сб, 6=Вс
-        # Находим следующий понедельник
-        days_until_monday = (7 - current_weekday) % 7
-        if days_until_monday == 0:
-            days_until_monday = 1
+    # Пятница — всегда понедельник
+    if current_weekday == 4:
+        return get_next_working_day(today)  # Понедельник
+    
+    # Суббота/воскресенье — всегда вторник
+    if current_weekday >= 5:
+        # Находим понедельник, затем следующий рабочий день (вторник)
+        days_until_monday = 7 - current_weekday
         next_monday = today + timedelta(days=days_until_monday)
-        # Вторник = понедельник + 1 день
-        return next_monday + timedelta(days=1)
+        return get_next_working_day(next_monday)  # Вторник
     
-    # Пятница - всегда понедельник
-    if current_weekday == 4:  # 4=Пт
-        return today + timedelta(days=3)  # Пт + 3 дня = Пн
-    
-    # Понедельник-четверг: стандартная логика
+    # Пн-Чт: стандартная логика с отсечкой по полудню
     next_working = get_next_working_day(today)
     
     if now.hour < cutoff_hour:

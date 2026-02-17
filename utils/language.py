@@ -98,8 +98,8 @@ MESSAGES = {
         'uz': '🏠 Turar-joy majmuasini tanlang:'
     },
     'enter_contract': {
-        'ru': '📝 Введите номер договора ДДУ:',
-        'uz': '📝 DDU shartnoma raqamini kiriting:'
+        'ru': '📝 Введите номер Вашего договора долевого участия по примеру 12345-GHP',
+        'uz': '📝 Ulushdorlik shartnomasi raqamingizni kiriting, masalan, 12345-GHP'
     },
     'contract_not_found': {
         'ru': '❌ Договор не найден. Проверьте номер и введите заново:',

@@ -151,3 +151,176 @@ def process_excel_file(file_path, project_name=None, address_ru=None, address_uz
         session.commit()
     
     return count, detected_project
+
+
+def analyze_excel_changes(file_path, project_name):
+    """
+    Анализ Excel-файла и сравнение с текущими данными в БД.
+    
+    Сопоставление по house_name + apt_num.
+    
+    Returns:
+        dict с ключами:
+            - new_contracts: список новых квартир (не найдены в БД)
+            - updated_contracts: список квартир с изменёнными данными (без смены договора)
+            - changed_contracts: список квартир со сменой номера договора
+    """
+    from database.models import Booking
+
+    df = pd.read_excel(file_path)
+    col_map, df = _detect_columns(df)
+
+    new_contracts = []
+    updated_contracts = []
+    changed_contracts = []
+
+    with SessionLocal() as session:
+        for _, row in df.iterrows():
+            house_name = str(row[col_map['Название дома']])
+
+            if house_name != project_name:
+                continue
+
+            apt_num = str(row[col_map['Номер квартиры']])
+            clean_contract = "".join(str(row[col_map['Номер договора']]).split()).upper()
+
+            raw_delivery_date = row[col_map['Дата сдачи']]
+            if isinstance(raw_delivery_date, str):
+                delivery_date = datetime.strptime(raw_delivery_date, '%d.%m.%Y').date()
+            else:
+                delivery_date = raw_delivery_date.date()
+
+            new_data = {
+                "house_name": house_name,
+                "apt_num": apt_num,
+                "entrance": str(row[col_map['Подъезд']]),
+                "floor": int(row[col_map['Этаж']]),
+                "contract_num": clean_contract,
+                "client_fio": str(row[col_map['ФИО клиента']]),
+                "delivery_date": delivery_date.isoformat(),
+            }
+
+            # Ищем существующий контракт по дому + квартире
+            existing = session.query(Contract).filter_by(
+                house_name=house_name, apt_num=apt_num
+            ).first()
+
+            if not existing:
+                # Новая квартира
+                new_contracts.append(new_data)
+            elif existing.contract_num != clean_contract:
+                # Изменился номер договора
+                active_bookings = session.query(Booking).filter(
+                    Booking.contract_id == existing.id,
+                    Booking.is_cancelled == False
+                ).count()
+                changed_contracts.append({
+                    "contract_id": existing.id,
+                    "apt_num": apt_num,
+                    "old_contract_num": existing.contract_num,
+                    "new_contract_num": clean_contract,
+                    "active_bookings_count": active_bookings,
+                    "telegram_id": existing.telegram_id,
+                    "new_data": new_data,
+                })
+            else:
+                # Проверяем изменения в остальных полях
+                changes = {}
+                if existing.entrance != new_data["entrance"]:
+                    changes["entrance"] = {"old": existing.entrance, "new": new_data["entrance"]}
+                if existing.floor != new_data["floor"]:
+                    changes["floor"] = {"old": existing.floor, "new": new_data["floor"]}
+                if existing.client_fio != new_data["client_fio"]:
+                    changes["client_fio"] = {"old": existing.client_fio, "new": new_data["client_fio"]}
+
+                existing_dd = existing.delivery_date.isoformat() if existing.delivery_date else None
+                if existing_dd != new_data["delivery_date"]:
+                    changes["delivery_date"] = {"old": existing_dd, "new": new_data["delivery_date"]}
+
+                if changes:
+                    updated_contracts.append({
+                        "contract_id": existing.id,
+                        "apt_num": apt_num,
+                        "contract_num": existing.contract_num,
+                        "changes": changes,
+                    })
+
+    return {
+        "new_contracts": new_contracts,
+        "updated_contracts": updated_contracts,
+        "changed_contracts": changed_contracts,
+    }
+
+
+def apply_contract_changes(analysis, apply_new=False, apply_updates=False, apply_changed=False):
+    """
+    Применение выбранных изменений в БД.
+    
+    Returns:
+        dict с результатами:
+            - added: количество добавленных
+            - updated: количество обновлённых
+            - contracts_changed: количество изменённых договоров
+            - bookings_cancelled: количество аннулированных записей
+            - notifications: список telegram_id для отправки уведомлений
+    """
+    from database.models import Booking
+
+    result = {
+        "added": 0,
+        "updated": 0,
+        "contracts_changed": 0,
+        "bookings_cancelled": 0,
+        "notifications": [],
+    }
+
+    with SessionLocal() as session:
+        if apply_new:
+            for item in analysis["new_contracts"]:
+                data = dict(item)
+                data["delivery_date"] = datetime.fromisoformat(data["delivery_date"]).date()
+                session.add(Contract(**data))
+                result["added"] += 1
+
+        if apply_updates:
+            for item in analysis["updated_contracts"]:
+                contract = session.query(Contract).get(item["contract_id"])
+                if contract:
+                    for key, change in item["changes"].items():
+                        value = change["new"]
+                        if key == "delivery_date":
+                            value = datetime.fromisoformat(value).date()
+                        setattr(contract, key, value)
+                    result["updated"] += 1
+
+        if apply_changed:
+            for item in analysis["changed_contracts"]:
+                contract = session.query(Contract).get(item["contract_id"])
+                if contract:
+                    # Аннулируем все активные записи
+                    active_bookings = session.query(Booking).filter(
+                        Booking.contract_id == contract.id,
+                        Booking.is_cancelled == False
+                    ).all()
+
+                    for booking in active_bookings:
+                        booking.is_cancelled = True
+                        result["bookings_cancelled"] += 1
+
+                    # Сохраняем telegram_id для уведомления
+                    if contract.telegram_id:
+                        result["notifications"].append(contract.telegram_id)
+
+                    # Обновляем данные контракта
+                    new_data = item["new_data"]
+                    contract.contract_num = new_data["contract_num"]
+                    contract.entrance = new_data["entrance"]
+                    contract.floor = new_data["floor"]
+                    contract.client_fio = new_data["client_fio"]
+                    contract.delivery_date = datetime.fromisoformat(new_data["delivery_date"]).date()
+
+                    result["contracts_changed"] += 1
+
+        session.commit()
+
+    return result

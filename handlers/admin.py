@@ -16,7 +16,7 @@ from config import ADMIN_ID
 from database.models import Booking, Contract
 from database.models import Setting
 from database.session import SessionLocal
-from utils.excel_reader import process_excel_file
+from utils.excel_reader import process_excel_file, analyze_excel_changes, apply_contract_changes
 from utils.states import AdminSteps
 from keyboards.reply import (
     get_admin_keyboard, get_staff_management_keyboard, 
@@ -48,6 +48,7 @@ ADMIN_MENU_BUTTONS = [
     "➕ Добавление проектов", "🏠 Список проектов",
     "🔙 Скрыть меню", "📝 Установить лимит для проекта",
     "📍 Установить адрес проекта", "🗺 Установить координаты проекта",
+    "📄 Изменить список договоров",
     "📊 Текущие настройки проектов", "◀️ Назад",
     "➕ Добавить администратора", "➕ Добавить сотрудника",
     "📋 Список персонала", "❌ Удалить из персонала"
@@ -77,6 +78,8 @@ async def reset_state_on_menu_button(message: types.Message, state: FSMContext):
         await start_set_project_address(message, state)
     elif text == "🗺 Установить координаты проекта":
         await start_set_project_coordinates(message, state)
+    elif text == "📄 Изменить список договоров":
+        await start_update_contracts(message, state)
     elif text == "➕ Добавление проектов":
         await start_add_project(message, state)
     elif text == "🏠 Список проектов":
@@ -830,6 +833,266 @@ async def process_project_longitude_edit(message: types.Message, state: FSMConte
         )
 
 
+# ========== ИЗМЕНЕНИЕ СПИСКА ДОГОВОРОВ ==========
+
+@router.message(F.text == "📄 Изменить список договоров")
+async def start_update_contracts(message: types.Message, state: FSMContext):
+    """Начало процесса изменения списка договоров"""
+    with SessionLocal() as session:
+        projects = session.execute(select(Contract.house_name).distinct()).scalars().all()
+        projects = [h for h in projects if h]
+
+        if not projects:
+            return await message.answer(
+                "❌ В базе нет проектов. Сначала загрузите контракты.",
+                reply_markup=get_back_keyboard()
+            )
+
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        for project in projects:
+            builder.button(text=project, callback_data=f"ucproj_{project[:40]}")
+        builder.adjust(1)
+
+        await state.set_state(AdminSteps.update_contracts_selecting_project)
+        await message.answer(
+            "📄 Изменение списка договоров\n\nВыберите проект:",
+            reply_markup=builder.as_markup()
+        )
+
+
+@router.callback_query(F.data.startswith("ucproj_"), AdminSteps.update_contracts_selecting_project)
+async def update_contracts_project_selected(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка выбора проекта для обновления договоров"""
+    project_name = callback.data.split("_", 1)[1]
+    await state.update_data(uc_project=project_name)
+    await state.set_state(AdminSteps.update_contracts_waiting_excel)
+
+    await callback.message.edit_text(
+        f"🏘 Проект: **{project_name}**\n\n"
+        f"Отправьте Excel-файл с актуальными договорами.\n\n"
+        f"Файл должен содержать столбцы:\n"
+        f"• Название дома\n"
+        f"• Номер квартиры\n"
+        f"• Подъезд\n"
+        f"• Этаж\n"
+        f"• Номер договора\n"
+        f"• ФИО клиента\n"
+        f"• Дата сдачи",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.message(AdminSteps.update_contracts_waiting_excel, F.document)
+async def update_contracts_process_excel(message: types.Message, bot: Bot, state: FSMContext):
+    """Обработка Excel файла для обновления договоров"""
+    if not message.document.file_name.endswith(('.xlsx', '.xls')):
+        return await message.answer("⚠️ Пожалуйста, отправьте файл в формате Excel (.xlsx или .xls)")
+
+    loading_msg = await message.answer("⏳ Анализ файла, подождите...")
+
+    try:
+        data = await state.get_data()
+        project_name = data['uc_project']
+
+        file_path = f"data/temp_update_{message.document.file_name}"
+        file = await bot.get_file(message.document.file_id)
+        await bot.download_file(file.file_path, file_path)
+
+        analysis = analyze_excel_changes(file_path, project_name)
+
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        await loading_msg.delete()
+
+        new_count = len(analysis["new_contracts"])
+        upd_count = len(analysis["updated_contracts"])
+        chg_count = len(analysis["changed_contracts"])
+
+        if new_count == 0 and upd_count == 0 and chg_count == 0:
+            await state.clear()
+            return await message.answer(
+                f"📄 Анализ файла для проекта **{project_name}**:\n\n"
+                f"✅ Изменений не обнаружено. Все данные в базе актуальны.",
+                parse_mode="Markdown",
+                reply_markup=get_admin_keyboard()
+            )
+
+        # Формируем отчёт
+        text = f"📄 Анализ файла для проекта **{project_name}**:\n\n"
+
+        if new_count > 0:
+            text += f"🆕 Новых квартир: {new_count}\n"
+        if upd_count > 0:
+            text += f"✏️ Обновлённых записей: {upd_count}\n"
+        if chg_count > 0:
+            total_bookings = sum(c["active_bookings_count"] for c in analysis["changed_contracts"])
+            text += f"⚠️ Смена договора: {chg_count}\n"
+            for c in analysis["changed_contracts"][:10]:
+                bk_info = f", записей: {c['active_bookings_count']}" if c['active_bookings_count'] > 0 else ""
+                text += f"   • Кв. {c['apt_num']} — {c['old_contract_num']} → {c['new_contract_num']}{bk_info}\n"
+            if chg_count > 10:
+                text += f"   ... и ещё {chg_count - 10}\n"
+            if total_bookings > 0:
+                text += f"\n❗ При смене договора будет аннулировано {total_bookings} записей\n"
+
+        text += "\nВыберите действия для применения:"
+
+        await state.update_data(uc_analysis=analysis, uc_selected=[])
+        await state.set_state(AdminSteps.update_contracts_confirming)
+
+        builder = _build_update_contracts_keyboard(analysis)
+        await message.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
+
+    except Exception as e:
+        logging.error(f"Ошибка при анализе файла: {e}")
+        try:
+            await loading_msg.delete()
+        except:
+            pass
+        await message.answer(
+            f"❌ Ошибка при обработке файла.\n\n"
+            f"Техническая ошибка: {e}\n\n"
+            "Отправьте корректный файл или нажмите «❌ Отменить».",
+            reply_markup=get_cancel_keyboard()
+        )
+
+
+@router.message(AdminSteps.update_contracts_waiting_excel)
+async def update_contracts_wrong_type(message: types.Message, state: FSMContext):
+    """Обработка неверного типа сообщения при ожидании файла"""
+    if message.text == "❌ Отменить":
+        await state.clear()
+        return await message.answer("❌ Операция отменена.", reply_markup=get_admin_keyboard())
+    await message.answer("⚠️ Пожалуйста, отправьте Excel файл (.xlsx или .xls)")
+
+
+def _build_update_contracts_keyboard(analysis, selected=None):
+    """Клавиатура мультивыбора для подтверждения изменений договоров."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    if selected is None:
+        selected = set()
+
+    builder = InlineKeyboardBuilder()
+    options = []
+
+    if analysis["new_contracts"]:
+        count = len(analysis["new_contracts"])
+        options.append(("add", f"Подтвердить добавление ({count})"))
+    if analysis["updated_contracts"]:
+        count = len(analysis["updated_contracts"])
+        options.append(("update", f"Подтвердить обновление ({count})"))
+    if analysis["changed_contracts"]:
+        count = len(analysis["changed_contracts"])
+        options.append(("change", f"Подтвердить смену договоров ({count})"))
+
+    for key, label in options:
+        prefix = "✅" if key in selected else "☐"
+        builder.button(text=f"{prefix} {label}", callback_data=f"ucsel_{key}")
+
+    if selected:
+        builder.button(text="▶️ Продолжить", callback_data="uc_proceed")
+    else:
+        builder.button(text="▫️ Выберите действие", callback_data="uc_noop")
+    builder.button(text="❌ Отменить", callback_data="uc_cancel")
+
+    rows = [1] * len(options) + [2]
+    builder.adjust(*rows)
+    return builder
+
+
+@router.callback_query(F.data.startswith("ucsel_"), AdminSteps.update_contracts_confirming)
+async def update_contracts_toggle(callback: types.CallbackQuery, state: FSMContext):
+    """Toggle выбора действия для обновления договоров"""
+    action = callback.data.split("_", 1)[1]
+    data = await state.get_data()
+    selected = set(data.get("uc_selected", []))
+    analysis = data["uc_analysis"]
+
+    if action in selected:
+        selected.discard(action)
+    else:
+        selected.add(action)
+
+    await state.update_data(uc_selected=list(selected))
+    builder = _build_update_contracts_keyboard(analysis, selected)
+    await callback.message.edit_reply_markup(reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "uc_noop", AdminSteps.update_contracts_confirming)
+async def update_contracts_noop(callback: types.CallbackQuery):
+    """Кнопка-заглушка когда ничего не выбрано"""
+    await callback.answer("Выберите хотя бы одно действие", show_alert=False)
+
+
+@router.callback_query(F.data == "uc_cancel", AdminSteps.update_contracts_confirming)
+async def update_contracts_cancel(callback: types.CallbackQuery, state: FSMContext):
+    """Отмена обновления договоров"""
+    await state.clear()
+    await callback.message.edit_text("❌ Операция отменена.")
+    await callback.message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "uc_proceed", AdminSteps.update_contracts_confirming)
+async def update_contracts_proceed(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    """Применение выбранных изменений"""
+    data = await state.get_data()
+    selected = set(data.get("uc_selected", []))
+    analysis = data["uc_analysis"]
+
+    await callback.message.edit_text("⏳ Применение изменений...")
+
+    try:
+        result = apply_contract_changes(
+            analysis,
+            apply_new="add" in selected,
+            apply_updates="update" in selected,
+            apply_changed="change" in selected,
+        )
+
+        # Отправляем уведомления клиентам
+        notification_count = 0
+        for telegram_id in result["notifications"]:
+            try:
+                await bot.send_message(
+                    telegram_id,
+                    "⚠️ Ваша запись была аннулирована в связи с изменением номера договора.\n"
+                    "Для повторной записи воспользуйтесь меню «📝 Первичная запись»."
+                )
+                notification_count += 1
+            except Exception as e:
+                logging.error(f"Ошибка отправки уведомления {telegram_id}: {e}")
+
+        # Формируем итоговое сообщение
+        text = "✅ Изменения применены:\n\n"
+        if result["added"] > 0:
+            text += f"🆕 Добавлено квартир: {result['added']}\n"
+        if result["updated"] > 0:
+            text += f"✏️ Обновлено записей: {result['updated']}\n"
+        if result["contracts_changed"] > 0:
+            text += f"🔄 Договоров изменено: {result['contracts_changed']}\n"
+        if result["bookings_cancelled"] > 0:
+            text += f"🚫 Записей аннулировано: {result['bookings_cancelled']}\n"
+        if notification_count > 0:
+            text += f"📨 Уведомлений отправлено: {notification_count}\n"
+
+        await state.clear()
+        await callback.message.edit_text(text)
+        await callback.message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+
+    except Exception as e:
+        logging.error(f"Ошибка применения изменений: {e}")
+        await state.clear()
+        await callback.message.edit_text(f"❌ Ошибка при применении изменений: {e}")
+        await callback.message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+
+    await callback.answer()
+
+
 # ========== ОСТАЛЬНЫЕ КНОПКИ ==========
 
 @router.message(F.text == "📊 Выгрузить отчет")
@@ -840,98 +1103,513 @@ async def export_report_button(message: types.Message):
 
 @router.message(F.text == "📋 Список записей")
 async def show_bookings_list(message: types.Message, state: FSMContext):
-    """Показать выбор проекта для просмотра записей"""
+    """Показать выбор проекта для просмотра записей (мультивыбор)"""
     with SessionLocal() as session:
         projects = session.execute(select(Contract.house_name).distinct()).scalars().all()
-        projects = [h for h in projects if h]
+        projects = sorted([h for h in projects if h])
 
     if not projects:
         return await message.answer("❌ В базе нет проектов.", reply_markup=get_admin_keyboard())
 
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-    builder = InlineKeyboardBuilder()
-    for project in projects:
-        builder.button(text=project, callback_data=f"bookings_{project[:40]}")
-    builder.adjust(1)
-
+    await state.update_data(bk_all_projects=projects, bk_selected_projects=[])
+    builder = _build_projects_keyboard(projects)
     await state.set_state(AdminSteps.selecting_project_for_bookings)
     await message.answer(
-        "📋 Выберите проект для просмотра записей:",
+        "📋 Выберите проекты для просмотра записей (можно несколько):",
         reply_markup=builder.as_markup()
     )
 
 
-@router.callback_query(F.data.startswith("bookings_"))
-async def show_bookings_for_project(callback: types.CallbackQuery, state: FSMContext):
-    """Показать записи по выбранному проекту"""
-    from datetime import date, timedelta
+def _build_projects_keyboard(projects, selected=None):
+    """Построить клавиатуру мультивыбора проектов."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    if selected is None:
+        selected = set()
+    builder = InlineKeyboardBuilder()
+    for project in projects:
+        label = project
+        if project in selected:
+            label = "✅ " + label
+        builder.button(text=label, callback_data=f"bkproj_{project[:40]}")
+    # Нижний ряд
+    if selected:
+        builder.button(text="✅ Подтвердить выбор", callback_data="bkproj_confirm")
+    else:
+        builder.button(text="▫️ Выберите проект", callback_data="bkproj_noop")
+    builder.button(text="⏩ Все проекты", callback_data="bkproj_skip")
+    rows = [1] * len(projects)
+    builder.adjust(*rows, 2)
+    return builder
 
-    project_name = callback.data.split("_", 1)[1]
+
+def _get_booking_weeks(session, project_names=None):
+    """Получить список недель, на которые есть активные записи."""
+    from datetime import date, timedelta
+    today = date.today()
+    query = (
+        session.query(Booking.date)
+        .join(Contract, Booking.contract_id == Contract.id)
+        .filter(Booking.date >= today, Booking.is_cancelled == False)
+    )
+    if project_names:
+        if isinstance(project_names, str):
+            query = query.filter(Contract.house_name == project_names)
+        else:
+            query = query.filter(Contract.house_name.in_(project_names))
+    dates = sorted(set(d[0] for d in query.all()))
+    if not dates:
+        return []
+    # Группируем по неделям (пн–вс)
+    weeks = []
+    seen = set()
+    for d in dates:
+        week_start = d - timedelta(days=d.weekday())  # Понедельник
+        if week_start in seen:
+            continue
+        seen.add(week_start)
+        week_end = week_start + timedelta(days=6)
+        weeks.append((week_start, week_end))
+    return weeks
+
+
+def _build_weeks_keyboard(weeks, selected=None):
+    """Построить клавиатуру выбора недель с мультивыбором."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    if selected is None:
+        selected = set()
+    builder = InlineKeyboardBuilder()
+    for ws, we in weeks:
+        label = f"{ws.strftime('%d.%m')}-{we.strftime('%d.%m')}"
+        key = ws.isoformat()
+        if key in selected:
+            label = "✅ " + label
+        builder.button(text=label, callback_data=f"bkweek_{key}")
+    # Нижний ряд: подтвердить + пропустить (всегда 2 кнопки)
+    if selected:
+        builder.button(text="✅ Подтвердить выбор", callback_data="bkweek_confirm")
+    else:
+        builder.button(text="▫️ Выберите неделю", callback_data="bkweek_noop")
+    builder.button(text="⏩ Пропустить", callback_data="bkweek_skip")
+    # Кнопки недель по 2, последние 2 — управление (всегда отдельный ряд)
+    week_rows = [2] * (len(weeks) // 2)
+    if len(weeks) % 2:
+        week_rows.append(1)
+    builder.adjust(*week_rows, 2)
+    return builder
+
+
+@router.callback_query(F.data.startswith("bkproj_"), AdminSteps.selecting_project_for_bookings)
+async def on_project_toggled(callback: types.CallbackQuery, state: FSMContext):
+    """Мультивыбор проектов: toggle / confirm / skip / noop."""
+    action = callback.data.split("_", 1)[1]
+
+    if action == "noop":
+        await callback.answer()
+        return
+
+    data = await state.get_data()
+    all_projects = data.get("bk_all_projects", [])
+    selected = set(data.get("bk_selected_projects", []))
+
+    if action == "skip":
+        # Все проекты
+        await state.update_data(bk_projects=None, bk_selected_weeks=[], bk_date_from=None, bk_date_to=None)
+        await _proceed_to_weeks(callback, state, project_names=None)
+        return
+
+    if action == "confirm":
+        selected_list = sorted(selected)
+        await state.update_data(bk_projects=selected_list, bk_selected_weeks=[], bk_date_from=None, bk_date_to=None)
+        await _proceed_to_weeks(callback, state, project_names=selected_list)
+        return
+
+    # Toggle конкретного проекта
+    project_key = action
+    # Находим полное имя проекта по усечённому callback_data
+    matched = [p for p in all_projects if p[:40] == project_key]
+    full_name = matched[0] if matched else project_key
+    if full_name in selected:
+        selected.discard(full_name)
+    else:
+        selected.add(full_name)
+
+    await state.update_data(bk_selected_projects=list(selected))
+    builder = _build_projects_keyboard(all_projects, selected)
+    await callback.message.edit_reply_markup(reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+async def _proceed_to_weeks(callback, state, project_names):
+    """После выбора проектов — показать выбор недель."""
+    with SessionLocal() as session:
+        weeks = _get_booking_weeks(session, project_names)
+
+    if not weeks:
+        if project_names:
+            label = "проектам: **" + ", ".join(project_names) + "**"
+        else:
+            label = "всем проектам"
+        await callback.message.edit_text(f"📋 По {label} активных записей нет.", parse_mode="Markdown")
+        await callback.message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+        await state.clear()
+        await callback.answer()
+        return
+
+    builder = _build_weeks_keyboard(weeks)
+    await state.set_state(AdminSteps.selecting_weeks_for_bookings)
+    await callback.message.edit_text(
+        "📅 Выберите недели для просмотра (можно несколько):",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bkweek_"), AdminSteps.selecting_weeks_for_bookings)
+async def on_week_toggled(callback: types.CallbackQuery, state: FSMContext):
+    """Мультивыбор недель: toggle / confirm / skip / noop."""
+    action = callback.data.split("_", 1)[1]
+
+    if action == "noop":
+        await callback.answer()
+        return
+
+    data = await state.get_data()
+    project_names = data.get("bk_projects")
+    selected = set(data.get("bk_selected_weeks", []))
+
+    if action == "skip":
+        # Пропустить — показать все записи без фильтра по дате
+        await state.update_data(bk_selected_weeks=[], bk_date_from=None, bk_date_to=None)
+        await _show_filtered_bookings(callback, state)
+        return
+
+    if action == "confirm":
+        selected_list = sorted(selected)
+        if len(selected_list) == 1:
+            # Ровно одна неделя — предложить выбор дня
+            from datetime import date as dt_date, timedelta
+            ws = dt_date.fromisoformat(selected_list[0])
+            we = ws + timedelta(days=6)
+            await state.update_data(bk_selected_weeks=selected_list)
+            await _show_day_selection(callback, state, ws, we, project_names)
+            return
+        else:
+            # Несколько недель — сразу показать записи
+            from datetime import date as dt_date, timedelta
+            all_starts = [dt_date.fromisoformat(s) for s in selected_list]
+            date_from = min(all_starts)
+            date_to = max(all_starts) + timedelta(days=6)
+            await state.update_data(bk_selected_weeks=selected_list, bk_date_from=date_from.isoformat(), bk_date_to=date_to.isoformat())
+            await _show_filtered_bookings(callback, state)
+            return
+
+    # Toggle конкретной недели
+    week_key = action
+    if week_key in selected:
+        selected.discard(week_key)
+    else:
+        selected.add(week_key)
+
+    await state.update_data(bk_selected_weeks=list(selected))
+
+    # Перерисовываем клавиатуру
+    with SessionLocal() as session:
+        weeks = _get_booking_weeks(session, project_names)
+    builder = _build_weeks_keyboard(weeks, selected)
+    await callback.message.edit_reply_markup(reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+def _build_days_keyboard(booking_dates, selected=None):
+    """Построить клавиатуру мультивыбора дней."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    if selected is None:
+        selected = set()
+    builder = InlineKeyboardBuilder()
+    for d in booking_dates:
+        label = d.strftime('%d.%m.%Y')
+        key = d.isoformat()
+        if key in selected:
+            label = "✅ " + label
+        builder.button(text=label, callback_data=f"bkday_{key}")
+    # Нижний ряд: подтвердить + пропустить (всегда 2 кнопки)
+    if selected:
+        builder.button(text="✅ Подтвердить выбор", callback_data="bkday_confirm")
+    else:
+        builder.button(text="▫️ Выберите день", callback_data="bkday_noop")
+    builder.button(text="⏩ Пропустить (вся неделя)", callback_data="bkday_skip")
+    day_rows = [2] * (len(booking_dates) // 2)
+    if len(booking_dates) % 2:
+        day_rows.append(1)
+    builder.adjust(*day_rows, 2)
+    return builder
+
+
+def _get_booking_dates_in_week(session, week_start, week_end, project_names=None):
+    """Получить даты с записями внутри недели."""
+    from datetime import date as dt_date
+    today = dt_date.today()
+    query = (
+        session.query(Booking.date)
+        .join(Contract, Booking.contract_id == Contract.id)
+        .filter(
+            Booking.date >= max(week_start, today),
+            Booking.date <= week_end,
+            Booking.is_cancelled == False,
+        )
+    )
+    if project_names:
+        if isinstance(project_names, str):
+            query = query.filter(Contract.house_name == project_names)
+        else:
+            query = query.filter(Contract.house_name.in_(project_names))
+    return sorted(set(d[0] for d in query.all()))
+
+
+async def _show_day_selection(callback, state, week_start, week_end, project_names):
+    """Показать выбор конкретных дней внутри недели (мультивыбор)."""
+    with SessionLocal() as session:
+        booking_dates = _get_booking_dates_in_week(session, week_start, week_end, project_names)
+
+    if not booking_dates:
+        await state.update_data(bk_date_from=week_start.isoformat(), bk_date_to=week_end.isoformat())
+        await _show_filtered_bookings(callback, state)
+        return
+
+    await state.update_data(bk_selected_days=[])
+    builder = _build_days_keyboard(booking_dates)
+
+    await state.set_state(AdminSteps.selecting_day_for_bookings)
+    await callback.message.edit_text(
+        f"📅 Выберите дни ({week_start.strftime('%d.%m')}-{week_end.strftime('%d.%m')}), можно несколько:",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bkday_"), AdminSteps.selecting_day_for_bookings)
+async def on_day_selected(callback: types.CallbackQuery, state: FSMContext):
+    """Мультивыбор дней: toggle / confirm / skip / noop."""
+    from datetime import date as dt_date, timedelta
+    action = callback.data.split("_", 1)[1]
+
+    if action == "noop":
+        await callback.answer()
+        return
+
+    data = await state.get_data()
+    project_names = data.get("bk_projects")
+    selected = set(data.get("bk_selected_days", []))
+    selected_weeks = data.get("bk_selected_weeks", [])
+
+    if action == "skip":
+        # Показать всю выбранную неделю
+        if selected_weeks:
+            ws = dt_date.fromisoformat(selected_weeks[0])
+            we = ws + timedelta(days=6)
+            await state.update_data(bk_date_from=ws.isoformat(), bk_date_to=we.isoformat(), bk_dates=None)
+        await _show_filtered_bookings(callback, state)
+        return
+
+    if action == "confirm":
+        # Подтвердить выбранные дни
+        await state.update_data(bk_dates=sorted(selected), bk_date_from=None, bk_date_to=None)
+        await _show_filtered_bookings(callback, state)
+        return
+
+    # Toggle конкретного дня
+    day_key = action
+    if day_key in selected:
+        selected.discard(day_key)
+    else:
+        selected.add(day_key)
+
+    await state.update_data(bk_selected_days=list(selected))
+
+    # Перерисовываем клавиатуру
+    if selected_weeks:
+        ws = dt_date.fromisoformat(selected_weeks[0])
+        we = ws + timedelta(days=6)
+    else:
+        ws = dt_date.today()
+        we = ws + timedelta(days=6)
+
+    with SessionLocal() as session:
+        booking_dates = _get_booking_dates_in_week(session, ws, we, project_names)
+    builder = _build_days_keyboard(booking_dates, selected)
+    await callback.message.edit_reply_markup(reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+async def _show_filtered_bookings(callback: types.CallbackQuery, state: FSMContext):
+    """Показать отфильтрованные записи — по одному сообщению на каждый проект."""
+    from datetime import date as dt_date
+    from collections import defaultdict
+
+    data = await state.get_data()
+    project_names = data.get("bk_projects")  # list или None (все)
+    date_from_str = data.get("bk_date_from")
+    date_to_str = data.get("bk_date_to")
+    bk_dates = data.get("bk_dates")  # Список конкретных дат (ISO)
     await state.clear()
 
     with SessionLocal() as session:
-        today = date.today()
-        week_later = today + timedelta(days=7)
-
-        bookings = (
+        today = dt_date.today()
+        query = (
             session.query(Booking, Contract)
             .join(Contract, Booking.contract_id == Contract.id)
-            .filter(
-                Booking.date >= today,
-                Booking.date <= week_later,
-                Booking.is_cancelled == False,
-                Contract.house_name == project_name
-            )
-            .order_by(Booking.date, Booking.time_slot)
-            .all()
+            .filter(Booking.is_cancelled == False)
         )
 
+        if project_names:
+            query = query.filter(Contract.house_name.in_(project_names))
+
+        if bk_dates:
+            date_objects = [dt_date.fromisoformat(d) for d in bk_dates]
+            query = query.filter(Booking.date.in_(date_objects), Booking.date >= today)
+        elif date_from_str and date_to_str:
+            date_from = dt_date.fromisoformat(date_from_str)
+            date_to = dt_date.fromisoformat(date_to_str)
+            query = query.filter(Booking.date >= max(date_from, today), Booking.date <= date_to)
+        else:
+            query = query.filter(Booking.date >= today)
+
+        bookings = query.all()
+
         if not bookings:
-            await callback.message.edit_text(
-                f"📋 По проекту **{project_name}** записей на ближайшую неделю нет.",
-                parse_mode="Markdown"
-            )
+            if project_names:
+                label = "проектам: **" + ", ".join(project_names) + "**"
+            else:
+                label = "всем проектам"
+            await callback.message.edit_text(f"📋 По {label} записей не найдено.", parse_mode="Markdown")
             await callback.message.answer("Главное меню:", reply_markup=get_admin_keyboard())
             await callback.answer()
             return
 
-        text = f"📋 **{project_name}** — записи на неделю:\n"
-        current_date = None
-
-        for booking, contract in bookings:
-            if booking.date != current_date:
-                current_date = booking.date
-                text += f"\n📅 **{booking.date.strftime('%d.%m')}**\n"
-
-            text += (
-                f"{booking.time_slot.strftime('%H:%M')}"
-                f" | кв.{contract.apt_num}"
-                f" | {contract.contract_num}\n"
+        # Определяем первую (самую раннюю) запись для каждого договора
+        from sqlalchemy import func as sa_func
+        contract_ids = set(contract.id for _, contract in bookings)
+        first_booking_subq = (
+            session.query(
+                Booking.contract_id,
+                sa_func.min(Booking.id).label("first_booking_id")
             )
+            .filter(Booking.contract_id.in_(contract_ids), Booking.is_cancelled == False)
+            .group_by(Booking.contract_id)
+            .all()
+        )
+        first_booking_ids = {row.first_booking_id for row in first_booking_subq}
 
-    # Разбиваем на части если текст слишком длинный
-    MAX_LEN = 4000
-    if len(text) <= MAX_LEN:
-        await callback.message.edit_text(text, parse_mode="Markdown")
-    else:
+        # Группируем по проектам
+        projects_data = defaultdict(list)
+        for booking, contract in bookings:
+            projects_data[contract.house_name].append((booking, contract))
+
+    # Удаляем исходное сообщение с кнопками
+    try:
         await callback.message.delete()
-        # Отправляем частями
+    except:
+        pass
+
+    # Отправляем по одному сообщению на каждый проект
+    for project_name in sorted(projects_data.keys()):
+        project_bookings = projects_data[project_name]
+        text = _format_project_bookings(project_name, project_bookings, first_booking_ids)
+        await _send_long_message(callback.message, text)
+
+    await callback.message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+    await callback.answer()
+
+
+def _pluralize_records(n: int) -> str:
+    """Склонение слова 'запись': 1 запись, 2 записи, 5 записей."""
+    if 11 <= n % 100 <= 19:
+        return "записей"
+    last = n % 10
+    if last == 1:
+        return "запись"
+    if 2 <= last <= 4:
+        return "записи"
+    return "записей"
+
+
+def _format_project_bookings(project_name: str, bookings: list, first_booking_ids: set = None) -> str:
+    """Форматирует записи одного проекта.
+    
+    Формат:
+    📋 **Проект**
+    
+    📅 **ДД.ММ** (N записей)
+      🕐 **ЧЧ:ММ** (M)
+        Подъезд X, этаж Y, кв. Z — Договор
+    
+    Итого: K записей
+    """
+    from collections import defaultdict
+    if first_booking_ids is None:
+        first_booking_ids = set()
+
+    total_count = len(bookings)
+
+    # Группируем: дата → время → список записей
+    dates_dict = defaultdict(lambda: defaultdict(list))
+    for booking, contract in bookings:
+        dates_dict[booking.date][booking.time_slot].append((booking, contract))
+
+    text = f"📋 **{project_name}**\n"
+
+    for bk_date in sorted(dates_dict.keys()):
+        time_slots = dates_dict[bk_date]
+        day_count = sum(len(items) for items in time_slots.values())
+        text += f"\n📅 **{bk_date.strftime('%d.%m.%Y')}** ( {day_count} {_pluralize_records(day_count)} )\n"
+
+        for time_slot in sorted(time_slots.keys()):
+            items = time_slots[time_slot]
+            slot_count = len(items)
+            text += f"  🕐 **{time_slot.strftime('%H:%M')}** ( {slot_count} {_pluralize_records(slot_count)} )\n"
+
+            # Сортируем по подъезду, этажу, квартире
+            def _sort_key(item):
+                _, c = item
+                try:
+                    entrance = int(c.entrance) if c.entrance else 0
+                except (ValueError, TypeError):
+                    entrance = 0
+                floor = c.floor if c.floor is not None else 0
+                try:
+                    apt = int(c.apt_num) if c.apt_num else 0
+                except (ValueError, TypeError):
+                    apt = 0
+                return (entrance, floor, apt)
+
+            for booking, contract in sorted(items, key=_sort_key):
+                entrance_str = f"подъезд {contract.entrance}" if contract.entrance else "—"
+                floor_str = f"этаж {contract.floor}" if contract.floor is not None else "—"
+                apt_str = f"кв. {contract.apt_num}" if contract.apt_num else "—"
+                repeat_str = " _(повторная)_" if booking.id not in first_booking_ids else ""
+                text += f"    {entrance_str}, {floor_str}, {apt_str} — {contract.contract_num}{repeat_str}\n"
+
+    text += f"\n📊 Итого по проекту: **{total_count}** записей\n"
+    return text
+
+
+async def _send_long_message(message, text: str, max_len: int = 4000):
+    """Отправить длинное сообщение, разбив на части при необходимости."""
+    if len(text) <= max_len:
+        await message.answer(text, parse_mode="Markdown")
+    else:
         parts = []
         current_part = ""
         for line in text.split("\n"):
-            if len(current_part) + len(line) + 1 > MAX_LEN:
+            if len(current_part) + len(line) + 1 > max_len:
                 parts.append(current_part)
                 current_part = line + "\n"
             else:
                 current_part += line + "\n"
         if current_part.strip():
             parts.append(current_part)
-
         for part in parts:
-            await callback.message.answer(part, parse_mode="Markdown")
-
-    await callback.message.answer("Главное меню:", reply_markup=get_admin_keyboard())
-    await callback.answer()
+            await message.answer(part, parse_mode="Markdown")
 
 
 @router.message(F.text == "🏠 Список проектов")
@@ -1180,10 +1858,11 @@ async def process_project_excel(message: types.Message, bot: Bot, state: FSMCont
         except:
             pass
         await message.answer(
-            f"❌ Ошибка при обработке файла.\n\nТехническая ошибка: {e}",
-            reply_markup=get_admin_keyboard()
+            f"❌ Ошибка при обработке файла.\n\n"
+            f"Техническая ошибка: {e}\n\n"
+            "Пожалуйста, отправьте корректный Excel-файл повторно или нажмите «❌ Отменить».",
+            reply_markup=get_cancel_keyboard()
         )
-        await state.clear()
 
 
 @router.message(AdminSteps.add_project_excel)

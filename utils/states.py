@@ -45,6 +45,8 @@ class AdminSteps(StatesGroup):
     
     # Просмотр записей по проекту
     selecting_project_for_bookings = State()
+    selecting_weeks_for_bookings = State()
+    selecting_day_for_bookings = State()
 
     # Редактирование настроек проекта
     edit_project_select = State()
@@ -53,3 +55,15 @@ class AdminSteps(StatesGroup):
     edit_project_address_uz = State()
     edit_project_latitude = State()
     edit_project_longitude = State()
+
+    # Изменение списка договоров
+    update_contracts_selecting_project = State()
+    update_contracts_waiting_excel = State()
+    update_contracts_confirming = State()
+
+
+class EmployeeSteps(StatesGroup):
+    """Состояния для работы панели сотрудника"""
+    selecting_project_for_bookings = State()
+    selecting_weeks_for_bookings = State()
+    selecting_day_for_bookings = State()
