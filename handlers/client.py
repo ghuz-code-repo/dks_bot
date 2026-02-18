@@ -1323,10 +1323,13 @@ async def contract_entered(message: types.Message, state: FSMContext):
                 return
         
         # Проверяем прошлые записи для определения владельца и периода ожидания
+        # Учитываем только неотменённые записи — если админ отменил запись и отвязал ТГ,
+        # отменённые записи не должны блокировать нового пользователя
         first_booking = (
             session.query(Booking)
             .filter(
                 Booking.contract_id == contract.id,
+                Booking.is_cancelled == False
             )
             .order_by(Booking.date.asc())
             .first()

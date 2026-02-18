@@ -335,6 +335,13 @@ def apply_contract_changes(new_contracts=None, minor_updates=None, review_decisi
                     if contract.telegram_id:
                         contract.telegram_id = None
                         result["unbound_tg"] += 1
+                    # Также очищаем user_telegram_id в записях этого договора,
+                    # чтобы отменённые записи не блокировали нового пользователя
+                    bookings_to_clear = session.query(Booking).filter(
+                        Booking.contract_id == contract.id
+                    ).all()
+                    for booking in bookings_to_clear:
+                        booking.user_telegram_id = None
 
                 # Всегда обновляем данные контракта
                 if item["type"] == "contract_change":
