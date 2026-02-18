@@ -23,23 +23,27 @@ def get_client_keyboard(lang: str = 'ru') -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
-def get_admin_keyboard() -> ReplyKeyboardMarkup:
+def get_admin_keyboard(with_back: bool = False) -> ReplyKeyboardMarkup:
     """Клавиатура для администратора"""
-    keyboard = [
+    keyboard = []
+    if with_back:
+        keyboard.append([KeyboardButton(text="🔙 Назад")])
+    keyboard += [
         [KeyboardButton(text="👥 Управление персоналом"), KeyboardButton(text="⚙️ Настройки проектов")],
         [KeyboardButton(text="📊 Выгрузить отчет"), KeyboardButton(text="📋 Список записей")],
-        [KeyboardButton(text="➕ Добавление проектов"), KeyboardButton(text="🏠 Список проектов")],
-        [KeyboardButton(text="🔙 Скрыть меню")]
+        [KeyboardButton(text="➕ Добавление проектов"), KeyboardButton(text="🏠 Список проектов")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
-def get_employee_keyboard() -> ReplyKeyboardMarkup:
+def get_employee_keyboard(with_back: bool = False) -> ReplyKeyboardMarkup:
     """Клавиатура для сотрудника"""
-    keyboard = [
+    keyboard = []
+    if with_back:
+        keyboard.append([KeyboardButton(text="🔙 Назад")])
+    keyboard += [
         [KeyboardButton(text="📊 Выгрузить отчет"), KeyboardButton(text="📋 Список записей")],
-        [KeyboardButton(text="🏠 Список проектов")],
-        [KeyboardButton(text="🔙 Скрыть меню")]
+        [KeyboardButton(text="🏠 Список проектов")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -47,9 +51,9 @@ def get_employee_keyboard() -> ReplyKeyboardMarkup:
 def get_staff_management_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура управления персоналом"""
     keyboard = [
+        [KeyboardButton(text="🔙 Назад")],
         [KeyboardButton(text="➕ Добавить администратора"), KeyboardButton(text="➕ Добавить сотрудника")],
-        [KeyboardButton(text="📋 Список персонала"), KeyboardButton(text="❌ Удалить из персонала")],
-        [KeyboardButton(text="◀️ Назад")]
+        [KeyboardButton(text="📋 Список персонала"), KeyboardButton(text="❌ Удалить из персонала")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -57,19 +61,19 @@ def get_staff_management_keyboard() -> ReplyKeyboardMarkup:
 def get_slots_management_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура управления слотами и проектами"""
     keyboard = [
+        [KeyboardButton(text="🔙 Назад")],
         [KeyboardButton(text="📝 Установить лимит для проекта")],
         [KeyboardButton(text="📍 Установить адрес проекта")],
         [KeyboardButton(text="🗺 Установить координаты проекта")],
         [KeyboardButton(text="📄 Изменить список договоров")],
-        [KeyboardButton(text="📊 Текущие настройки проектов")],
-        [KeyboardButton(text="◀️ Назад")]
+        [KeyboardButton(text="📊 Текущие настройки проектов")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 def get_back_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура с кнопкой Назад"""
-    keyboard = [[KeyboardButton(text="◀️ Назад")]]
+    keyboard = [[KeyboardButton(text="🔙 Назад")]]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 

@@ -20,7 +20,7 @@ from utils.excel_reader import process_excel_file, analyze_excel_changes, apply_
 from utils.states import AdminSteps
 from keyboards.reply import (
     get_admin_keyboard, get_staff_management_keyboard, 
-    get_slots_management_keyboard, get_back_keyboard, get_cancel_keyboard
+    get_slots_management_keyboard, get_cancel_keyboard
 )
 from keyboards.inline import generate_houses_kb
 
@@ -46,10 +46,10 @@ ADMIN_MENU_BUTTONS = [
     "👥 Управление персоналом", "⚙️ Настройки проектов",
     "📊 Выгрузить отчет", "📋 Список записей",
     "➕ Добавление проектов", "🏠 Список проектов",
-    "🔙 Скрыть меню", "📝 Установить лимит для проекта",
+    "📝 Установить лимит для проекта",
     "📍 Установить адрес проекта", "🗺 Установить координаты проекта",
     "📄 Изменить список договоров",
-    "📊 Текущие настройки проектов", "◀️ Назад",
+    "📊 Текущие настройки проектов", "🔙 Назад",
     "➕ Добавить администратора", "➕ Добавить сотрудника",
     "📋 Список персонала", "❌ Удалить из персонала"
 ]
@@ -59,17 +59,20 @@ ADMIN_MENU_BUTTONS = [
 @router.message(StateFilter(AdminSteps), F.text.in_(ADMIN_MENU_BUTTONS))
 async def reset_state_on_menu_button(message: types.Message, state: FSMContext):
     """Сброс состояния при нажатии кнопки меню и перенаправление"""
+    text = message.text
+
+    # Кнопка «Назад» обрабатывается с учётом текущего шага
+    if text == "🔙 Назад":
+        await _handle_back_navigation(message, state)
+        return
+
     await state.clear()
     
     # Перенаправляем на соответствующий обработчик
-    text = message.text
-    
     if text == "👥 Управление персоналом":
         await message.answer("👥 Управление персоналом\n\nВыберите действие:", reply_markup=get_staff_management_keyboard())
     elif text == "⚙️ Настройки проектов":
         await message.answer("⚙️ Настройки проектов\n\nВыберите действие:", reply_markup=get_slots_management_keyboard())
-    elif text == "◀️ Назад":
-        await message.answer("Главное меню:", reply_markup=get_admin_keyboard())
     elif text == "📊 Текущие настройки проектов":
         await show_project_settings(message)
     elif text == "📝 Установить лимит для проекта":
@@ -96,9 +99,215 @@ async def reset_state_on_menu_button(message: types.Message, state: FSMContext):
         await show_staff_list_button(message)
     elif text == "❌ Удалить из персонала":
         await start_delete_staff(message, state)
-    elif text == "🔙 Скрыть меню":
-        await hide_menu(message, state)
     else:
+        await message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+
+
+async def _handle_back_navigation(message: types.Message, state: FSMContext):
+    """Маршрутизация кнопки «Назад» с учётом текущего шага"""
+    current_state = await state.get_state()
+
+    # === Добавление проекта ===
+    if current_state == AdminSteps.add_project_address_ru:
+        await state.clear()
+        await message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+
+    elif current_state == AdminSteps.add_project_address_uz:
+        await state.set_state(AdminSteps.add_project_address_ru)
+        await message.answer(
+            "🏗️ **Добавление нового проекта**\n\n"
+            "Введите адрес проекта на русском языке:",
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard(with_back=True)
+        )
+
+    elif current_state == AdminSteps.add_project_slots_limit:
+        await state.set_state(AdminSteps.add_project_address_uz)
+        await message.answer(
+            "Введите адрес проекта на узбекском языке:",
+            reply_markup=get_admin_keyboard(with_back=True)
+        )
+
+    elif current_state == AdminSteps.add_project_latitude:
+        await state.set_state(AdminSteps.add_project_slots_limit)
+        await message.answer(
+            "Введите лимит слотов для проекта (целое число):\n\n"
+            "Например: 2 — означает, что на каждый временной слот можно записать 2 клиента.",
+            reply_markup=get_admin_keyboard(with_back=True)
+        )
+
+    elif current_state == AdminSteps.add_project_longitude:
+        await state.set_state(AdminSteps.add_project_latitude)
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        builder.button(text="📍 Использовать стандартные координаты", callback_data="use_default_coords")
+        builder.adjust(1)
+        await message.answer(
+            "📍 Введите широту (latitude) для геолокации проекта\n\n"
+            "Например: 41.281067\n\n"
+            "Или используйте стандартные координаты офиса:",
+            reply_markup=builder.as_markup()
+        )
+
+    elif current_state == AdminSteps.add_project_excel:
+        await state.set_state(AdminSteps.add_project_latitude)
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        builder.button(text="📍 Использовать стандартные координаты", callback_data="use_default_coords")
+        builder.adjust(1)
+        await message.answer(
+            "📍 Введите широту (latitude) для геолокации проекта\n\n"
+            "Например: 41.281067\n\n"
+            "Или используйте стандартные координаты офиса:",
+            reply_markup=builder.as_markup()
+        )
+
+    # === Настройки проектов: первые шаги → меню настроек ===
+    elif current_state in (
+        AdminSteps.selecting_project_for_slots,
+        AdminSteps.selecting_project_for_address,
+        AdminSteps.edit_project_select,
+        AdminSteps.update_contracts_selecting_project,
+    ):
+        await state.clear()
+        await message.answer("⚙️ Настройки проектов\n\nВыберите действие:", reply_markup=get_slots_management_keyboard())
+
+    # === Установка лимита ===
+    elif current_state == AdminSteps.waiting_for_slot_limit:
+        # Назад к выбору проекта
+        with SessionLocal() as session:
+            projects = session.execute(select(Contract.house_name).distinct()).scalars().all()
+            projects = [h for h in projects if h]
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        for project in projects:
+            builder.button(text=project, callback_data=f"setslot_{project[:40]}")
+        builder.adjust(1)
+        await state.set_state(AdminSteps.selecting_project_for_slots)
+        await message.answer(
+            "Выберите проект:",
+            reply_markup=builder.as_markup()
+        )
+
+    # === Установка адреса ===
+    elif current_state == AdminSteps.waiting_for_address_ru:
+        # Назад к выбору проекта
+        with SessionLocal() as session:
+            projects = session.execute(select(Contract.house_name).distinct()).scalars().all()
+            projects = [h for h in projects if h]
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        for project in projects:
+            builder.button(text=project, callback_data=f"setaddr_{project[:40]}")
+        builder.adjust(1)
+        await state.set_state(AdminSteps.selecting_project_for_address)
+        await message.answer(
+            "Выберите проект для установки адреса:",
+            reply_markup=builder.as_markup()
+        )
+
+    elif current_state == AdminSteps.waiting_for_address_uz:
+        data = await state.get_data()
+        project_name = data.get('selected_project', '')
+        await state.set_state(AdminSteps.waiting_for_address_ru)
+        await message.answer(
+            f"🏘 Проект: **{project_name}**\n\n"
+            f"Введите адрес на **русском** языке:",
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard(with_back=True)
+        )
+
+    # === Установка координат ===
+    elif current_state == AdminSteps.edit_project_latitude:
+        # Назад к выбору проекта
+        with SessionLocal() as session:
+            projects = session.execute(select(Contract.house_name).distinct()).scalars().all()
+            projects = [h for h in projects if h]
+        await state.update_data(projects_list=projects)
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        for idx, project in enumerate(projects):
+            builder.button(text=project, callback_data=f"coord_{idx}")
+        builder.adjust(1)
+        await state.set_state(AdminSteps.edit_project_select)
+        await message.answer(
+            "Выберите проект для установки координат:",
+            reply_markup=builder.as_markup()
+        )
+
+    elif current_state == AdminSteps.edit_project_longitude:
+        data = await state.get_data()
+        project_name = data.get('selected_project', '')
+        await state.set_state(AdminSteps.edit_project_latitude)
+        await message.answer(
+            f"🏘 Проект: **{project_name}**\n\n"
+            f"Введите новую **широту** (latitude), например: 41.281067",
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard(with_back=True)
+        )
+
+    # === Изменение списка договоров — ожидание Excel ===
+    elif current_state == AdminSteps.update_contracts_waiting_excel:
+        with SessionLocal() as session:
+            projects = session.execute(select(Contract.house_name).distinct()).scalars().all()
+            projects = [h for h in projects if h]
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        for project in projects:
+            builder.button(text=project, callback_data=f"ucproj_{project[:40]}")
+        builder.adjust(1)
+        await state.set_state(AdminSteps.update_contracts_selecting_project)
+        await message.answer(
+            "📄 Изменение списка договоров\n\nВыберите проект:",
+            reply_markup=builder.as_markup()
+        )
+
+    # === Управление персоналом ===
+    elif current_state in (
+        AdminSteps.waiting_for_admin_id,
+        AdminSteps.waiting_for_employee_id,
+        AdminSteps.waiting_for_staff_id_to_delete,
+    ):
+        await state.clear()
+        await message.answer(
+            "👥 Управление персоналом\n\nВыберите действие:",
+            reply_markup=get_staff_management_keyboard()
+        )
+
+    # === Список записей ===
+    elif current_state == AdminSteps.selecting_project_for_bookings:
+        await state.clear()
+        await message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+
+    elif current_state == AdminSteps.selecting_weeks_for_bookings:
+        # Назад к выбору проектов
+        data = await state.get_data()
+        all_projects = data.get("bk_all_projects", [])
+        selected_projects = set(data.get("bk_selected_projects", []))
+        builder = _build_projects_keyboard(all_projects, selected_projects)
+        await state.set_state(AdminSteps.selecting_project_for_bookings)
+        await message.answer(
+            "📋 Выберите проекты для просмотра записей (можно несколько):",
+            reply_markup=builder.as_markup()
+        )
+
+    elif current_state == AdminSteps.selecting_day_for_bookings:
+        # Назад к выбору недель
+        data = await state.get_data()
+        project_names = data.get("bk_projects")
+        selected_weeks = set(data.get("bk_selected_weeks", []))
+        with SessionLocal() as session:
+            weeks = _get_booking_weeks(session, project_names)
+        builder = _build_weeks_keyboard(weeks, selected_weeks)
+        await state.set_state(AdminSteps.selecting_weeks_for_bookings)
+        await message.answer(
+            "📅 Выберите недели для просмотра (можно несколько):",
+            reply_markup=builder.as_markup()
+        )
+
+    # По умолчанию — главное меню
+    else:
+        await state.clear()
         await message.answer("Главное меню:", reply_markup=get_admin_keyboard())
 
 
@@ -246,14 +455,7 @@ async def show_admin_menu(message: types.Message):
 
 # ========== ОБРАБОТЧИКИ КНОПОК КЛАВИАТУРЫ ==========
 
-@router.message(F.text == "🔙 Скрыть меню")
-async def hide_menu(message: types.Message, state: FSMContext):
-    """Возврат в главное меню"""
-    await state.clear()
-    await message.answer("Главное меню:", reply_markup=get_admin_keyboard())
-
-
-@router.message(F.text == "◀️ Назад")
+@router.message(F.text == "🔙 Назад")
 async def back_to_main_menu(message: types.Message, state: FSMContext):
     """Возврат в главное меню"""
     await state.clear()
@@ -277,7 +479,7 @@ async def start_add_admin(message: types.Message, state: FSMContext):
     await state.set_state(AdminSteps.waiting_for_admin_id)
     await message.answer(
         "Отправьте Telegram ID нового администратора:",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_admin_keyboard(with_back=True)
     )
 
 
@@ -305,7 +507,7 @@ async def process_add_admin(message: types.Message, state: FSMContext):
             reply_markup=get_admin_keyboard()
         )
     except ValueError:
-        await message.answer("❌ Неверный формат. Введите числовой ID:", reply_markup=get_cancel_keyboard())
+        await message.answer("❌ Неверный формат. Введите числовой ID:", reply_markup=get_admin_keyboard(with_back=True))
 
 
 @router.message(F.text == "➕ Добавить сотрудника")
@@ -314,7 +516,7 @@ async def start_add_employee(message: types.Message, state: FSMContext):
     await state.set_state(AdminSteps.waiting_for_employee_id)
     await message.answer(
         "Отправьте Telegram ID нового сотрудника:",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_admin_keyboard(with_back=True)
     )
 
 
@@ -342,7 +544,7 @@ async def process_add_employee(message: types.Message, state: FSMContext):
             reply_markup=get_admin_keyboard()
         )
     except ValueError:
-        await message.answer("❌ Неверный формат. Введите числовой ID:", reply_markup=get_cancel_keyboard())
+        await message.answer("❌ Неверный формат. Введите числовой ID:", reply_markup=get_admin_keyboard(with_back=True))
 
 
 @router.message(F.text == "📋 Список персонала")
@@ -366,7 +568,7 @@ async def start_delete_staff(message: types.Message, state: FSMContext):
     await state.set_state(AdminSteps.waiting_for_staff_id_to_delete)
     await message.answer(
         "Отправьте Telegram ID пользователя для удаления:",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_admin_keyboard(with_back=True)
     )
 
 
@@ -392,9 +594,9 @@ async def process_delete_staff(message: types.Message, state: FSMContext):
                     reply_markup=get_admin_keyboard()
                 )
             else:
-                await message.answer("❌ Пользователь не найден в базе.", reply_markup=get_cancel_keyboard())
+                await message.answer("❌ Пользователь не найден в базе.", reply_markup=get_admin_keyboard(with_back=True))
     except ValueError:
-        await message.answer("❌ Неверный формат. Введите числовой ID:", reply_markup=get_cancel_keyboard())
+        await message.answer("❌ Неверный формат. Введите числовой ID:", reply_markup=get_admin_keyboard(with_back=True))
 
 
 # ========== УПРАВЛЕНИЕ СЛОТАМИ ==========
@@ -419,7 +621,7 @@ async def start_set_project_slots(message: types.Message, state: FSMContext):
         if not projects:
             return await message.answer(
                 "❌ В базе нет проектов. Сначала загрузите контракты.",
-                reply_markup=get_back_keyboard()
+                reply_markup=get_admin_keyboard(with_back=True)
             )
         
         # Создаем inline-клавиатуру с проектами
@@ -457,7 +659,7 @@ async def project_selected_for_slots(callback: types.CallbackQuery, state: FSMCo
     await callback.answer()
 
 
-@router.message(AdminSteps.waiting_for_slot_limit, F.text == "◀️ Назад")
+@router.message(AdminSteps.waiting_for_slot_limit, F.text == "🔙 Назад")
 async def cancel_set_slot_limit(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
@@ -469,7 +671,7 @@ async def process_slot_limit(message: types.Message, state: FSMContext):
     try:
         limit = int(message.text.strip())
         if limit < 1:
-            return await message.answer("❌ Лимит должен быть больше 0", reply_markup=get_back_keyboard())
+            return await message.answer("❌ Лимит должен быть больше 0", reply_markup=get_admin_keyboard(with_back=True))
         
         user_data = await state.get_data()
         project_name = user_data.get('selected_project')
@@ -489,7 +691,7 @@ async def process_slot_limit(message: types.Message, state: FSMContext):
             reply_markup=get_admin_keyboard()
         )
     except ValueError:
-        await message.answer("❌ Неверный формат. Введите число:", reply_markup=get_back_keyboard())
+        await message.answer("❌ Неверный формат. Введите число:", reply_markup=get_admin_keyboard(with_back=True))
 
 
 @router.message(F.text == "📊 Текущие настройки проектов")
@@ -540,7 +742,7 @@ async def start_set_project_address(message: types.Message, state: FSMContext):
         if not projects:
             return await message.answer(
                 "❌ В базе нет проектов. Сначала загрузите контракты.",
-                reply_markup=get_back_keyboard()
+                reply_markup=get_admin_keyboard(with_back=True)
             )
         
         # Создаем inline-клавиатуру с проектами
@@ -605,7 +807,7 @@ async def keep_current_addresses(callback: types.CallbackQuery, state: FSMContex
     await callback.answer()
 
 
-@router.message(AdminSteps.waiting_for_address_ru, F.text == "◀️ Назад")
+@router.message(AdminSteps.waiting_for_address_ru, F.text == "🔙 Назад")
 async def cancel_set_address(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
@@ -622,11 +824,11 @@ async def process_address_ru(message: types.Message, state: FSMContext):
         f"✅ Адрес (RU): {address_ru}\n\n"
         f"Теперь введите адрес на **узбекском** языке:",
         parse_mode="Markdown",
-        reply_markup=get_back_keyboard()
+        reply_markup=get_admin_keyboard(with_back=True)
     )
 
 
-@router.message(AdminSteps.waiting_for_address_uz, F.text == "◀️ Назад")
+@router.message(AdminSteps.waiting_for_address_uz, F.text == "🔙 Назад")
 async def cancel_set_address_uz(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
@@ -677,7 +879,7 @@ async def start_set_project_coordinates(message: types.Message, state: FSMContex
         if not projects:
             return await message.answer(
                 "❌ В базе нет проектов. Сначала загрузите контракты.",
-                reply_markup=get_back_keyboard()
+                reply_markup=get_admin_keyboard(with_back=True)
             )
         
         # Сохраняем список проектов в state для последующего использования
@@ -750,7 +952,7 @@ async def keep_current_coordinates(callback: types.CallbackQuery, state: FSMCont
     await callback.answer()
 
 
-@router.message(AdminSteps.edit_project_latitude, F.text == "◀️ Назад")
+@router.message(AdminSteps.edit_project_latitude, F.text == "🔙 Назад")
 async def cancel_set_coordinates(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
@@ -764,7 +966,7 @@ async def process_project_latitude_edit(message: types.Message, state: FSMContex
         if not (-90 <= latitude <= 90):
             return await message.answer(
                 "⚠️ Широта должна быть в диапазоне от -90 до 90. Попробуйте снова:",
-                reply_markup=get_back_keyboard()
+                reply_markup=get_admin_keyboard(with_back=True)
             )
         
         await state.update_data(latitude=str(latitude))
@@ -774,16 +976,16 @@ async def process_project_latitude_edit(message: types.Message, state: FSMContex
             f"✅ Широта: {latitude}\n\n"
             f"Теперь введите **долготу** (longitude), например: 69.306903",
             parse_mode="Markdown",
-            reply_markup=get_back_keyboard()
+            reply_markup=get_admin_keyboard(with_back=True)
         )
     except ValueError:
         await message.answer(
             "❌ Неверный формат. Введите число (можно с десятичной точкой):",
-            reply_markup=get_back_keyboard()
+            reply_markup=get_admin_keyboard(with_back=True)
         )
 
 
-@router.message(AdminSteps.edit_project_longitude, F.text == "◀️ Назад")
+@router.message(AdminSteps.edit_project_longitude, F.text == "🔙 Назад")
 async def cancel_set_longitude(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
@@ -797,7 +999,7 @@ async def process_project_longitude_edit(message: types.Message, state: FSMConte
         if not (-180 <= longitude <= 180):
             return await message.answer(
                 "⚠️ Долгота должна быть в диапазоне от -180 до 180. Попробуйте снова:",
-                reply_markup=get_back_keyboard()
+                reply_markup=get_admin_keyboard(with_back=True)
             )
         
         user_data = await state.get_data()
@@ -829,7 +1031,7 @@ async def process_project_longitude_edit(message: types.Message, state: FSMConte
     except ValueError:
         await message.answer(
             "❌ Неверный формат. Введите число (можно с десятичной точкой):",
-            reply_markup=get_back_keyboard()
+            reply_markup=get_admin_keyboard(with_back=True)
         )
 
 
@@ -845,7 +1047,7 @@ async def start_update_contracts(message: types.Message, state: FSMContext):
         if not projects:
             return await message.answer(
                 "❌ В базе нет проектов. Сначала загрузите контракты.",
-                reply_markup=get_back_keyboard()
+                reply_markup=get_admin_keyboard(with_back=True)
             )
 
         from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -920,30 +1122,52 @@ async def update_contracts_process_excel(message: types.Message, bot: Bot, state
                 reply_markup=get_admin_keyboard()
             )
 
+        # Разделяем updated_contracts: без смены ФИО (minor) и со сменой ФИО (review)
+        minor_updates = [u for u in analysis["updated_contracts"] if "client_fio" not in u["changes"]]
+        fio_updates = [u for u in analysis["updated_contracts"] if "client_fio" in u["changes"]]
+
+        # Формируем список для индивидуального обзора
+        review_contracts = []
+        for item in fio_updates:
+            review_contracts.append({"type": "fio_change", **item})
+        for item in analysis["changed_contracts"]:
+            review_contracts.append({"type": "contract_change", **item})
+
+        minor_count = len(minor_updates)
+        review_count = len(review_contracts)
+
         # Формируем отчёт
         text = f"📄 Анализ файла для проекта **{project_name}**:\n\n"
 
         if new_count > 0:
             text += f"🆕 Новых квартир: {new_count}\n"
-        if upd_count > 0:
-            text += f"✏️ Обновлённых записей: {upd_count}\n"
-        if chg_count > 0:
-            total_bookings = sum(c["active_bookings_count"] for c in analysis["changed_contracts"])
-            text += f"⚠️ Смена договора: {chg_count}\n"
-            for c in analysis["changed_contracts"][:10]:
-                bk_info = f", записей: {c['active_bookings_count']}" if c['active_bookings_count'] > 0 else ""
-                text += f"   • Кв. {c['apt_num']} — {c['old_contract_num']} → {c['new_contract_num']}{bk_info}\n"
-            if chg_count > 10:
-                text += f"   ... и ещё {chg_count - 10}\n"
-            if total_bookings > 0:
-                text += f"\n❗ При смене договора будет аннулировано {total_bookings} записей\n"
+        if minor_count > 0:
+            text += f"✏️ Обновлённых записей (поля): {minor_count}\n"
+        if review_count > 0:
+            text += f"📋 Договоров для обзора: {review_count}\n"
+            for c in review_contracts[:5]:
+                if c["type"] == "contract_change":
+                    text += f"   • Кв. {c['apt_num']} — {c['old_contract_num']} → {c['new_contract_num']}\n"
+                else:
+                    old_fio = c["changes"]["client_fio"]["old"]
+                    new_fio = c["changes"]["client_fio"]["new"]
+                    text += f"   • Кв. {c['apt_num']} — ФИО: {old_fio} → {new_fio}\n"
+            if review_count > 5:
+                text += f"   ... и ещё {review_count - 5}\n"
 
-        text += "\nВыберите действия для применения:"
+        text += "\nВыберите действия:"
 
-        await state.update_data(uc_analysis=analysis, uc_selected=[])
+        await state.update_data(
+            uc_analysis=analysis,
+            uc_minor_updates=minor_updates,
+            uc_review_contracts=review_contracts,
+            uc_review_decisions={},
+            uc_review_index=0,
+            uc_selected=[]
+        )
         await state.set_state(AdminSteps.update_contracts_confirming)
 
-        builder = _build_update_contracts_keyboard(analysis)
+        builder = _build_update_contracts_keyboard(new_count, minor_count, review_count)
         await message.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
 
     except Exception as e:
@@ -955,8 +1179,8 @@ async def update_contracts_process_excel(message: types.Message, bot: Bot, state
         await message.answer(
             f"❌ Ошибка при обработке файла.\n\n"
             f"Техническая ошибка: {e}\n\n"
-            "Отправьте корректный файл или нажмите «❌ Отменить».",
-            reply_markup=get_cancel_keyboard()
+            "Отправьте корректный файл или нажмите «🔙 Назад».",
+            reply_markup=get_admin_keyboard(with_back=True)
         )
 
 
@@ -969,72 +1193,95 @@ async def update_contracts_wrong_type(message: types.Message, state: FSMContext)
     await message.answer("⚠️ Пожалуйста, отправьте Excel файл (.xlsx или .xls)")
 
 
-def _build_update_contracts_keyboard(analysis, selected=None):
-    """Клавиатура мультивыбора для подтверждения изменений договоров."""
+def _build_update_contracts_keyboard(new_count, minor_count, review_count, selected=None):
+    """Клавиатура мультивыбора для подтверждения изменений (добавление + обновление).
+    Если есть договоры для обзора — кнопка перехода к обзору."""
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     if selected is None:
         selected = set()
 
     builder = InlineKeyboardBuilder()
-    options = []
+    option_count = 0
 
-    if analysis["new_contracts"]:
-        count = len(analysis["new_contracts"])
-        options.append(("add", f"Подтвердить добавление ({count})"))
-    if analysis["updated_contracts"]:
-        count = len(analysis["updated_contracts"])
-        options.append(("update", f"Подтвердить обновление ({count})"))
-    for key, label in options:
-        prefix = "✅" if key in selected else "☐"
-        builder.button(text=f"{prefix} {label}", callback_data=f"ucsel_{key}")
+    if new_count > 0:
+        prefix = "✅" if "add" in selected else "☐"
+        builder.button(text=f"{prefix} Подтвердить добавление ({new_count})", callback_data="ucsel_add")
+        option_count += 1
+    if minor_count > 0:
+        prefix = "✅" if "update" in selected else "☐"
+        builder.button(text=f"{prefix} Подтвердить обновление ({minor_count})", callback_data="ucsel_update")
+        option_count += 1
 
-    # Смена договоров — два взаимоисключающих варианта (радиокнопки)
-    change_options = []
-    if analysis["changed_contracts"]:
-        count = len(analysis["changed_contracts"])
-        change_options.append(("change_notify", f"Смена договоров с уведомлением ({count})"))
-        change_options.append(("change_silent", f"Смена договоров без уведомления ({count})"))
-
-    for key, label in change_options:
-        prefix = "🔘" if key in selected else "○"
-        builder.button(text=f"{prefix} {label}", callback_data=f"ucsel_{key}")
-
-    total_options = len(options) + len(change_options)
-    if selected:
-        builder.button(text="▶️ Продолжить", callback_data="uc_proceed")
+    # Нижний ряд
+    if review_count > 0:
+        builder.button(text=f"▶️ Далее к обзору ({review_count})", callback_data="uc_proceed")
+    elif selected:
+        builder.button(text="▶️ Применить", callback_data="uc_proceed")
     else:
         builder.button(text="▫️ Выберите действие", callback_data="uc_noop")
+    builder.button(text="🔙 Назад", callback_data="uc_back")
     builder.button(text="❌ Отменить", callback_data="uc_cancel")
 
-    rows = [1] * total_options + [2]
+    rows = [1] * option_count + [3]
     builder.adjust(*rows)
     return builder
 
 
+async def _show_confirming_screen(callback, state):
+    """Показать экран подтверждения (мультивыбор добавление/обновление)."""
+    data = await state.get_data()
+    analysis = data["uc_analysis"]
+    project_name = data["uc_project"]
+    minor_updates = data.get("uc_minor_updates", [])
+    review_contracts = data.get("uc_review_contracts", [])
+    selected = set(data.get("uc_selected", []))
+
+    new_count = len(analysis["new_contracts"])
+    minor_count = len(minor_updates)
+    review_count = len(review_contracts)
+
+    text = f"📄 Анализ файла для проекта **{project_name}**:\n\n"
+    if new_count > 0:
+        text += f"🆕 Новых квартир: {new_count}\n"
+    if minor_count > 0:
+        text += f"✏️ Обновлённых записей (поля): {minor_count}\n"
+    if review_count > 0:
+        text += f"📋 Договоров для обзора: {review_count}\n"
+        for c in review_contracts[:5]:
+            if c["type"] == "contract_change":
+                text += f"   • Кв. {c['apt_num']} — {c['old_contract_num']} → {c['new_contract_num']}\n"
+            else:
+                old_fio = c["changes"]["client_fio"]["old"]
+                new_fio = c["changes"]["client_fio"]["new"]
+                text += f"   • Кв. {c['apt_num']} — ФИО: {old_fio} → {new_fio}\n"
+        if review_count > 5:
+            text += f"   ... и ещё {review_count - 5}\n"
+    text += "\nВыберите действия:"
+
+    builder = _build_update_contracts_keyboard(new_count, minor_count, review_count, selected)
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("ucsel_"), AdminSteps.update_contracts_confirming)
 async def update_contracts_toggle(callback: types.CallbackQuery, state: FSMContext):
-    """Toggle выбора действия для обновления договоров"""
+    """Toggle выбора действия (добавление / обновление)"""
     action = callback.data.split("_", 1)[1]
     data = await state.get_data()
     selected = set(data.get("uc_selected", []))
-    analysis = data["uc_analysis"]
 
-    # change_notify и change_silent — взаимоисключающие (радиокнопки)
-    if action in ("change_notify", "change_silent"):
-        other = "change_silent" if action == "change_notify" else "change_notify"
-        selected.discard(other)
-        if action in selected:
-            selected.discard(action)
-        else:
-            selected.add(action)
+    if action in selected:
+        selected.discard(action)
     else:
-        if action in selected:
-            selected.discard(action)
-        else:
-            selected.add(action)
+        selected.add(action)
 
     await state.update_data(uc_selected=list(selected))
-    builder = _build_update_contracts_keyboard(analysis, selected)
+
+    new_count = len(data["uc_analysis"]["new_contracts"])
+    minor_count = len(data.get("uc_minor_updates", []))
+    review_count = len(data.get("uc_review_contracts", []))
+
+    builder = _build_update_contracts_keyboard(new_count, minor_count, review_count, selected)
     await callback.message.edit_reply_markup(reply_markup=builder.as_markup())
     await callback.answer()
 
@@ -1043,6 +1290,27 @@ async def update_contracts_toggle(callback: types.CallbackQuery, state: FSMConte
 async def update_contracts_noop(callback: types.CallbackQuery):
     """Кнопка-заглушка когда ничего не выбрано"""
     await callback.answer("Выберите хотя бы одно действие", show_alert=False)
+
+
+@router.callback_query(F.data == "uc_back", AdminSteps.update_contracts_confirming)
+async def update_contracts_back_to_projects(callback: types.CallbackQuery, state: FSMContext):
+    """Назад к выбору проекта"""
+    with SessionLocal() as session:
+        projects = session.execute(select(Contract.house_name).distinct()).scalars().all()
+        projects = [h for h in projects if h]
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    for project in projects:
+        builder.button(text=project, callback_data=f"ucproj_{project[:40]}")
+    builder.adjust(1)
+
+    await state.set_state(AdminSteps.update_contracts_selecting_project)
+    await callback.message.edit_text(
+        "📄 Изменение списка договоров\n\nВыберите проект:",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "uc_cancel", AdminSteps.update_contracts_confirming)
@@ -1054,30 +1322,255 @@ async def update_contracts_cancel(callback: types.CallbackQuery, state: FSMConte
     await callback.answer()
 
 
+@router.callback_query(F.data == "uc_cancel", AdminSteps.update_contracts_reviewing)
+async def update_contracts_cancel_review(callback: types.CallbackQuery, state: FSMContext):
+    """Отмена обновления на этапе обзора"""
+    await state.clear()
+    await callback.message.edit_text("❌ Операция отменена.")
+    await callback.message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+    await callback.answer()
+
+
 @router.callback_query(F.data == "uc_proceed", AdminSteps.update_contracts_confirming)
 async def update_contracts_proceed(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
-    """Применение выбранных изменений"""
+    """Переход к обзору договоров или применение изменений"""
+    data = await state.get_data()
+    review_contracts = data.get("uc_review_contracts", [])
+
+    if review_contracts:
+        # Переходим к пошаговому обзору договоров
+        await state.update_data(uc_review_index=0, uc_review_decisions={})
+        await state.set_state(AdminSteps.update_contracts_reviewing)
+        await _show_review_contract(callback, state)
+    else:
+        # Нет договоров для обзора — применяем сразу
+        await _apply_all_changes(callback, state, bot)
+
+
+# ========== ПОШАГОВЫЙ ОБЗОР ДОГОВОРОВ ==========
+
+def _build_review_contract_keyboard(review_contract, selected_actions=None):
+    """Клавиатура мультивыбора действий для одного договора."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    if selected_actions is None:
+        selected_actions = set()
+
+    builder = InlineKeyboardBuilder()
+
+    options = [
+        ("unbind_tg", "Удалить привязку к ТГ"),
+        ("cancel_bookings", "Удалить активную запись"),
+        ("notify", "Уведомить пользователя"),
+    ]
+
+    for key, label in options:
+        prefix = "✅" if key in selected_actions else "☐"
+        builder.button(text=f"{prefix} {label}", callback_data=f"ucrev_{key}")
+
+    builder.button(text="✅ Готово", callback_data="ucrev_done")
+    builder.button(text="🔙 Назад", callback_data="ucrev_back")
+    builder.button(text="❌ Отменить", callback_data="uc_cancel")
+
+    builder.adjust(1, 1, 1, 3)
+    return builder
+
+
+async def _show_review_contract(callback, state):
+    """Показать детали текущего договора для обзора."""
+    data = await state.get_data()
+    review_contracts = data["uc_review_contracts"]
+    index = data.get("uc_review_index", 0)
+    all_actions = data.get("uc_review_decisions", {})
+
+    if index >= len(review_contracts):
+        # Все договоры просмотрены — показываем итог
+        await _show_final_summary(callback, state)
+        return
+
+    contract = review_contracts[index]
+    current_actions = set(all_actions.get(str(index), []))
+    total = len(review_contracts)
+
+    text = f"📋 Обзор договоров ({index + 1}/{total})\n\n"
+    text += f"🏠 Кв. {contract['apt_num']}\n"
+
+    if contract["type"] == "contract_change":
+        text += f"📝 Договор: {contract['old_contract_num']} → {contract['new_contract_num']}\n"
+        if contract.get("new_data", {}).get("client_fio"):
+            text += f"👤 ФИО: {contract['new_data']['client_fio']}\n"
+        if contract["active_bookings_count"] > 0:
+            text += f"📅 Активных записей: {contract['active_bookings_count']}\n"
+    else:  # fio_change
+        text += f"📝 Договор: {contract['contract_num']} (без изменений)\n"
+        field_names = {
+            "client_fio": "👤 ФИО",
+            "entrance": "🚪 Подъезд",
+            "floor": "🏢 Этаж",
+            "delivery_date": "📅 Дата сдачи",
+        }
+        for field, change in contract["changes"].items():
+            name = field_names.get(field, field)
+            text += f"{name}: {change['old']} → {change['new']}\n"
+
+    if contract.get("telegram_id"):
+        text += f"📱 Привязан к ТГ: `{contract['telegram_id']}`\n"
+    else:
+        text += "📱 Не привязан к ТГ\n"
+
+    text += "\nВыберите действия:"
+
+    builder = _build_review_contract_keyboard(contract, current_actions)
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ucrev_"), AdminSteps.update_contracts_reviewing)
+async def update_contracts_review_action(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    """Обработка выбора действия для конкретного договора (мультиселект)."""
+    action = callback.data.split("_", 1)[1]
+
+    data = await state.get_data()
+    review_contracts = data["uc_review_contracts"]
+    index = data.get("uc_review_index", 0)
+    all_actions = data.get("uc_review_decisions", {})
+    current_actions = set(all_actions.get(str(index), []))
+
+    if action == "done":
+        # Переход к следующему договору
+        await state.update_data(uc_review_index=index + 1)
+        await _show_review_contract(callback, state)
+        return
+
+    if action == "back":
+        # Назад: к предыдущему договору или к экрану подтверждения
+        if index > 0:
+            await state.update_data(uc_review_index=index - 1)
+            await _show_review_contract(callback, state)
+        else:
+            await state.set_state(AdminSteps.update_contracts_confirming)
+            await _show_confirming_screen(callback, state)
+        return
+
+    # Toggle действия
+    if action in current_actions:
+        current_actions.discard(action)
+    else:
+        current_actions.add(action)
+
+    all_actions[str(index)] = list(current_actions)
+    await state.update_data(uc_review_decisions=all_actions)
+
+    contract = review_contracts[index]
+    builder = _build_review_contract_keyboard(contract, current_actions)
+    await callback.message.edit_reply_markup(reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+async def _show_final_summary(callback, state):
+    """Итоговый обзор перед применением всех изменений."""
     data = await state.get_data()
     selected = set(data.get("uc_selected", []))
     analysis = data["uc_analysis"]
+    minor_updates = data.get("uc_minor_updates", [])
+    review_contracts = data.get("uc_review_contracts", [])
+    all_actions = data.get("uc_review_decisions", {})
+
+    text = "📊 Итоговый обзор:\n\n"
+
+    if "add" in selected:
+        text += f"🆕 Будет добавлено: {len(analysis['new_contracts'])} квартир\n"
+    if "update" in selected:
+        text += f"✏️ Будет обновлено (поля): {len(minor_updates)} записей\n"
+
+    # Считаем статистику по обзору
+    unbind_count = 0
+    cancel_count = 0
+    notify_count = 0
+    update_data_count = len(review_contracts)  # Данные всегда обновляются
+
+    for i in range(len(review_contracts)):
+        actions = set(all_actions.get(str(i), []))
+        if "unbind_tg" in actions:
+            unbind_count += 1
+        if "cancel_bookings" in actions:
+            cancel_count += 1
+        if "notify" in actions:
+            notify_count += 1
+
+    if update_data_count > 0:
+        text += f"📝 Данные договоров обновлено: {update_data_count}\n"
+    if unbind_count > 0:
+        text += f"🔓 Отвязка от ТГ: {unbind_count}\n"
+    if cancel_count > 0:
+        text += f"🚫 Аннулирование записей: {cancel_count}\n"
+    if notify_count > 0:
+        text += f"🔔 Уведомлений: {notify_count}\n"
+
+    has_actions = ("add" in selected or "update" in selected or update_data_count > 0)
+
+    text += "\nПрименить изменения?"
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    if has_actions:
+        builder.button(text="✅ Применить", callback_data="uc_apply_all")
+    else:
+        builder.button(text="▫️ Нечего применять", callback_data="ucrev_noop_final")
+    builder.button(text="🔙 Назад", callback_data="uc_back_to_review")
+    builder.button(text="❌ Отменить", callback_data="uc_cancel")
+    builder.adjust(3)
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ucrev_noop_final", AdminSteps.update_contracts_reviewing)
+async def update_contracts_noop_final(callback: types.CallbackQuery):
+    await callback.answer("Нечего применять", show_alert=False)
+
+
+@router.callback_query(F.data == "uc_back_to_review", AdminSteps.update_contracts_reviewing)
+async def update_contracts_back_to_review(callback: types.CallbackQuery, state: FSMContext):
+    """Назад к последнему обзорному договору из итогового экрана"""
+    data = await state.get_data()
+    review_contracts = data.get("uc_review_contracts", [])
+    last_index = max(0, len(review_contracts) - 1)
+    await state.update_data(uc_review_index=last_index)
+    await _show_review_contract(callback, state)
+
+
+@router.callback_query(F.data == "uc_apply_all", AdminSteps.update_contracts_reviewing)
+async def update_contracts_apply_all(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    """Применение всех изменений после обзора"""
+    await _apply_all_changes(callback, state, bot)
+
+
+async def _apply_all_changes(callback, state, bot):
+    """Применить все выбранные изменения (и bulk, и per-contract)."""
+    data = await state.get_data()
+    selected = set(data.get("uc_selected", []))
+    analysis = data["uc_analysis"]
+    minor_updates = data.get("uc_minor_updates", [])
+    review_contracts = data.get("uc_review_contracts", [])
+    all_actions = data.get("uc_review_decisions", {})
 
     await callback.message.edit_text("⏳ Применение изменений...")
 
     try:
-        apply_changed = "change_notify" in selected or "change_silent" in selected
-        send_notifications = "change_notify" in selected
+        # Собираем решения по обзору
+        review_decisions_list = []
+        for i, contract in enumerate(review_contracts):
+            actions = set(all_actions.get(str(i), []))
+            review_decisions_list.append({**contract, "actions": list(actions)})
 
         result = apply_contract_changes(
-            analysis,
-            apply_new="add" in selected,
-            apply_updates="update" in selected,
-            apply_changed=apply_changed,
+            new_contracts=analysis["new_contracts"] if "add" in selected else None,
+            minor_updates=minor_updates if "update" in selected else None,
+            review_decisions=review_decisions_list if review_decisions_list else None,
         )
 
-        # Отправляем уведомления клиентам (только если выбрано "с уведомлением")
+        # Отправляем уведомления клиентам
         notification_count = 0
-        if not send_notifications:
-            result["notifications"] = []
         for telegram_id in result["notifications"]:
             try:
                 await bot.send_message(
@@ -1099,6 +1592,8 @@ async def update_contracts_proceed(callback: types.CallbackQuery, state: FSMCont
             text += f"🔄 Договоров изменено: {result['contracts_changed']}\n"
         if result["bookings_cancelled"] > 0:
             text += f"🚫 Записей аннулировано: {result['bookings_cancelled']}\n"
+        if result.get("unbound_tg", 0) > 0:
+            text += f"🔓 Отвязано от ТГ: {result['unbound_tg']}\n"
         if notification_count > 0:
             text += f"📨 Уведомлений отправлено: {notification_count}\n"
 
@@ -1137,7 +1632,11 @@ async def show_bookings_list(message: types.Message, state: FSMContext):
     builder = _build_projects_keyboard(projects)
     await state.set_state(AdminSteps.selecting_project_for_bookings)
     await message.answer(
-        "📋 Выберите проекты для просмотра записей (можно несколько):",
+        "📋 Список записей",
+        reply_markup=get_admin_keyboard(with_back=True)
+    )
+    await message.answer(
+        "Выберите проекты для просмотра записей (можно несколько):",
         reply_markup=builder.as_markup()
     )
 
@@ -1295,6 +1794,20 @@ async def on_week_toggled(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
+    if action == "back":
+        # Назад к выбору проектов
+        data = await state.get_data()
+        all_projects = data.get("bk_all_projects", [])
+        selected_projects = set(data.get("bk_selected_projects", []))
+        builder = _build_projects_keyboard(all_projects, selected_projects)
+        await state.set_state(AdminSteps.selecting_project_for_bookings)
+        await callback.message.edit_text(
+            "📋 Выберите проекты для просмотра записей (можно несколько):",
+            reply_markup=builder.as_markup()
+        )
+        await callback.answer()
+        return
+
     data = await state.get_data()
     project_names = data.get("bk_projects")
     selected = set(data.get("bk_selected_weeks", []))
@@ -1416,6 +1929,22 @@ async def on_day_selected(callback: types.CallbackQuery, state: FSMContext):
     action = callback.data.split("_", 1)[1]
 
     if action == "noop":
+        await callback.answer()
+        return
+
+    if action == "back":
+        # Назад к выбору недель
+        data = await state.get_data()
+        project_names = data.get("bk_projects")
+        selected_weeks = set(data.get("bk_selected_weeks", []))
+        with SessionLocal() as session:
+            weeks = _get_booking_weeks(session, project_names)
+        builder = _build_weeks_keyboard(weeks, selected_weeks)
+        await state.set_state(AdminSteps.selecting_weeks_for_bookings)
+        await callback.message.edit_text(
+            "📅 Выберите недели для просмотра (можно несколько):",
+            reply_markup=builder.as_markup()
+        )
         await callback.answer()
         return
 
@@ -1663,7 +2192,7 @@ async def start_add_project(message: types.Message, state: FSMContext):
         "🏗️ **Добавление нового проекта**\n\n"
         "Введите адрес проекта на русском языке:",
         parse_mode="Markdown",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_admin_keyboard(with_back=True)
     )
 
 
@@ -1678,7 +2207,7 @@ async def process_project_address_ru(message: types.Message, state: FSMContext):
     await state.set_state(AdminSteps.add_project_address_uz)
     await message.answer(
         "Введите адрес проекта на узбекском языке:",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_admin_keyboard(with_back=True)
     )
 
 
@@ -1694,7 +2223,7 @@ async def process_project_address_uz(message: types.Message, state: FSMContext):
     await message.answer(
         "Введите лимит слотов для проекта (целое число):\n\n"
         "Например: 2 — означает, что на каждый временной слот можно записать 2 клиента.",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_admin_keyboard(with_back=True)
     )
 
 
@@ -1757,7 +2286,7 @@ async def use_default_coordinates(callback: types.CallbackQuery, state: FSMConte
             "• Номер договора\n"
             "• ФИО клиента\n"
             "• Дата сдачи",
-            reply_markup=get_cancel_keyboard()
+            reply_markup=get_admin_keyboard(with_back=True)
         )
     await callback.answer()
 
@@ -1779,7 +2308,7 @@ async def process_project_latitude(message: types.Message, state: FSMContext):
         await message.answer(
             "📍 Введите долготу (longitude) для геолокации проекта\n\n"
             "Например: 69.306903",
-            reply_markup=get_cancel_keyboard()
+            reply_markup=get_admin_keyboard(with_back=True)
         )
     except ValueError:
         await message.answer("⚠️ Введите число (можно с десятичной точкой):")
@@ -1809,7 +2338,7 @@ async def process_project_longitude(message: types.Message, state: FSMContext):
             "• Номер договора\n"
             "• ФИО клиента\n"
             "• Дата сдачи",
-            reply_markup=get_cancel_keyboard()
+            reply_markup=get_admin_keyboard(with_back=True)
         )
     except ValueError:
         await message.answer("⚠️ Введите число (можно с десятичной точкой):")
@@ -1882,8 +2411,8 @@ async def process_project_excel(message: types.Message, bot: Bot, state: FSMCont
         await message.answer(
             f"❌ Ошибка при обработке файла.\n\n"
             f"Техническая ошибка: {e}\n\n"
-            "Пожалуйста, отправьте корректный Excel-файл повторно или нажмите «❌ Отменить».",
-            reply_markup=get_cancel_keyboard()
+            "Пожалуйста, отправьте корректный Excel-файл повторно или нажмите «🔙 Назад».",
+            reply_markup=get_admin_keyboard(with_back=True)
         )
 
 

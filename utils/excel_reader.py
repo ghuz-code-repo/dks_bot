@@ -252,9 +252,19 @@ def analyze_excel_changes(file_path, project_name):
     }
 
 
-def apply_contract_changes(analysis, apply_new=False, apply_updates=False, apply_changed=False):
+def apply_contract_changes(new_contracts=None, minor_updates=None, review_decisions=None):
     """
-    Применение выбранных изменений в БД.
+    Применение изменений в БД.
+    
+    Args:
+        new_contracts: список данных для новых квартир (добавить)
+        minor_updates: список {contract_id, changes} для обновления полей (без ФИО)
+        review_decisions: список индивидуальных решений по договорам:
+            Каждый элемент содержит:
+            - type: "fio_change" или "contract_change"
+            - contract_id: ID контракта
+            - actions: set из выбранных действий: {"unbind_tg", "cancel_bookings", "notify"}
+            - changes / new_data: данные для обновления
     
     Returns:
         dict с результатами:
@@ -262,6 +272,7 @@ def apply_contract_changes(analysis, apply_new=False, apply_updates=False, apply
             - updated: количество обновлённых
             - contracts_changed: количество изменённых договоров
             - bookings_cancelled: количество аннулированных записей
+            - unbound_tg: количество отвязанных аккаунтов
             - notifications: список telegram_id для отправки уведомлений
     """
     from database.models import Booking
@@ -271,19 +282,22 @@ def apply_contract_changes(analysis, apply_new=False, apply_updates=False, apply
         "updated": 0,
         "contracts_changed": 0,
         "bookings_cancelled": 0,
+        "unbound_tg": 0,
         "notifications": [],
     }
 
     with SessionLocal() as session:
-        if apply_new:
-            for item in analysis["new_contracts"]:
+        # 1. Добавление новых квартир
+        if new_contracts:
+            for item in new_contracts:
                 data = dict(item)
                 data["delivery_date"] = datetime.fromisoformat(data["delivery_date"]).date()
                 session.add(Contract(**data))
                 result["added"] += 1
 
-        if apply_updates:
-            for item in analysis["updated_contracts"]:
+        # 2. Применение незначительных обновлений (без ФИО)
+        if minor_updates:
+            for item in minor_updates:
                 contract = session.query(Contract).get(item["contract_id"])
                 if contract:
                     for key, change in item["changes"].items():
@@ -293,33 +307,51 @@ def apply_contract_changes(analysis, apply_new=False, apply_updates=False, apply
                         setattr(contract, key, value)
                     result["updated"] += 1
 
-        if apply_changed:
-            for item in analysis["changed_contracts"]:
+        # 3. Применение индивидуальных решений по договорам
+        if review_decisions:
+            for item in review_decisions:
+                actions = set(item.get("actions", []))
+
                 contract = session.query(Contract).get(item["contract_id"])
-                if contract:
-                    # Аннулируем все активные записи
+                if not contract:
+                    continue
+
+                # Уведомление — сохраняем telegram_id ДО возможной отвязки
+                if "notify" in actions and contract.telegram_id:
+                    result["notifications"].append(contract.telegram_id)
+
+                # Аннулировать активные записи
+                if "cancel_bookings" in actions:
                     active_bookings = session.query(Booking).filter(
                         Booking.contract_id == contract.id,
                         Booking.is_cancelled == False
                     ).all()
-
                     for booking in active_bookings:
                         booking.is_cancelled = True
                         result["bookings_cancelled"] += 1
 
-                    # Сохраняем telegram_id для уведомления
+                # Отвязать telegram
+                if "unbind_tg" in actions:
                     if contract.telegram_id:
-                        result["notifications"].append(contract.telegram_id)
+                        contract.telegram_id = None
+                        result["unbound_tg"] += 1
 
-                    # Обновляем данные контракта
+                # Всегда обновляем данные контракта
+                if item["type"] == "contract_change":
                     new_data = item["new_data"]
                     contract.contract_num = new_data["contract_num"]
                     contract.entrance = new_data["entrance"]
                     contract.floor = new_data["floor"]
                     contract.client_fio = new_data["client_fio"]
                     contract.delivery_date = datetime.fromisoformat(new_data["delivery_date"]).date()
-
                     result["contracts_changed"] += 1
+                elif item["type"] == "fio_change":
+                    for key, change in item["changes"].items():
+                        value = change["new"]
+                        if key == "delivery_date":
+                            value = datetime.fromisoformat(value).date()
+                        setattr(contract, key, value)
+                    result["updated"] += 1
 
         session.commit()
 

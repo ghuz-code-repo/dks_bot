@@ -60,6 +60,7 @@ class AdminSteps(StatesGroup):
     update_contracts_selecting_project = State()
     update_contracts_waiting_excel = State()
     update_contracts_confirming = State()
+    update_contracts_reviewing = State()
 
 
 class EmployeeSteps(StatesGroup):

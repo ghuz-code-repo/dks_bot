@@ -39,13 +39,7 @@ async def show_employee_menu(message: types.Message):
     )
 
 
-@router.message(F.text == "🔙 Скрыть меню")
-async def hide_menu(message: types.Message):
-    """Возврат в главное меню"""
-    await message.answer("Главное меню:", reply_markup=get_employee_keyboard())
-
-
-@router.message(F.text == "📊 Выгрузить отчет")
+@router.message(F.text == " Выгрузить отчет")
 async def export_report_employee(message: types.Message):
     """Выгрузить отчет (для сотрудников)"""
     # Отправляем сообщение о выполнении операции
@@ -120,7 +114,11 @@ async def show_bookings_list_employee(message: types.Message, state: FSMContext)
 
     await state.set_state(EmployeeSteps.selecting_project_for_bookings)
     await message.answer(
-        "📋 Выберите проект для просмотра записей:",
+        "📋 Список записей",
+        reply_markup=get_employee_keyboard(with_back=True)
+    )
+    await message.answer(
+        "Выберите проект для просмотра записей:",
         reply_markup=builder.as_markup()
     )
 
