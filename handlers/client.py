@@ -62,6 +62,7 @@ def get_project_coordinates(project_name: str) -> tuple[float, float] | None:
 def validate_phone_number(phone: str) -> tuple[bool, str]:
     """
     Валидация номера телефона.
+    Разрешены только номера Узбекистана (+998), России (+7) и Казахстана (+7).
     
     Args:
         phone: Введённый номер телефона
@@ -76,18 +77,22 @@ def validate_phone_number(phone: str) -> tuple[bool, str]:
     if not re.match(r'^\+?\d+$', cleaned):
         return False, ""
     
-    # Удаляем + для подсчёта цифр
+    # Удаляем + для унификации
     digits_only = cleaned.lstrip('+')
     
-    # Проверяем длину (от 9 до 15 цифр - международный стандарт)
-    if len(digits_only) < 9 or len(digits_only) > 15:
-        return False, ""
+    # Нормализация: если ввели через 8 (Россия/Казахстан) — заменяем на 7
+    if digits_only.startswith('8') and len(digits_only) == 11:
+        digits_only = '7' + digits_only[1:]
     
-    # Если номер начинается не с +, добавляем +
-    if not cleaned.startswith('+'):
-        cleaned = '+' + cleaned
+    # Узбекистан: +998 XX XXX XX XX (12 цифр)
+    if digits_only.startswith('998') and len(digits_only) == 12:
+        return True, '+' + digits_only
     
-    return True, cleaned
+    # Россия / Казахстан: +7 XXX XXX XX XX (11 цифр)
+    if digits_only.startswith('7') and len(digits_only) == 11:
+        return True, '+' + digits_only
+    
+    return False, ""
 
 
 def get_project_slot_limit(session, project_name: str) -> int:
@@ -629,6 +634,13 @@ async def rebook_accepted(callback: types.CallbackQuery, state: FSMContext, bot:
                 f"🔄 **Запись отменена (перезапись)!**\n\n"
                 f"👤 Клиент: {old_contract.client_fio if old_contract else 'N/A'}\n"
                 f"🏠 Объект: {house_name}\n"
+            )
+            if old_contract:
+                notification_text += (
+                    f"🏢 Кв. {old_contract.apt_num}, подъезд {old_contract.entrance}, этаж {old_contract.floor}\n"
+                    f"📄 Договор: {old_contract.contract_num}\n"
+                )
+            notification_text += (
                 f"📅 Дата: {old_date_str}\n"
                 f"⏰ Время: {old_time_str}\n\n"
                 f"Клиент перезаписывается на {selected_date.strftime('%d.%m.%Y')} {selected_time_str}"
@@ -836,7 +848,17 @@ async def calendar_phone_contact_received(message: types.Message, state: FSMCont
     user_phone = message.contact.phone_number
     if not user_phone.startswith('+'):
         user_phone = '+' + user_phone
-    await _process_calendar_booking(message, state, bot, user_phone, is_callback=False)
+    
+    is_valid, cleaned_phone = validate_phone_number(user_phone)
+    if not is_valid:
+        lang = get_user_language(message.from_user.id)
+        await message.answer(
+            get_message('invalid_phone', lang),
+            reply_markup=get_phone_request_keyboard(lang)
+        )
+        return
+    
+    await _process_calendar_booking(message, state, bot, cleaned_phone, is_callback=False)
 
 
 @router.message(ClientSteps.calendar_entering_phone)
@@ -908,7 +930,11 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
             cancelled_info.append({
                 'date': old_booking.date.strftime('%d.%m.%Y'),
                 'time': old_booking.time_slot.strftime('%H:%M'),
-                'fio': old_contract.client_fio if old_contract else 'N/A'
+                'fio': old_contract.client_fio if old_contract else 'N/A',
+                'apt_num': old_contract.apt_num if old_contract else 'N/A',
+                'entrance': old_contract.entrance if old_contract else 'N/A',
+                'floor': old_contract.floor if old_contract else 'N/A',
+                'contract_num': old_contract.contract_num if old_contract else 'N/A',
             })
 
         new_booking = Booking(
@@ -928,6 +954,8 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
                     f"🔄 **Запись отменена (перезапись)!**\n\n"
                     f"👤 Клиент: {ci['fio']}\n"
                     f"🏠 Объект: {house_name}\n"
+                    f"🏢 Кв. {ci['apt_num']}, подъезд {ci['entrance']}, этаж {ci['floor']}\n"
+                    f"📄 Договор: {ci['contract_num']}\n"
                     f"📅 Дата: {ci['date']}\n"
                     f"⏰ Время: {ci['time']}\n\n"
                     f"Клиент перезаписался на {selected_date.strftime('%d.%m.%Y')} {time_str}"
@@ -951,6 +979,8 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
             f"👤 Клиент: {client_fio}\n"
             f"📞 Тел: {user_phone}\n"
             f"🏠 Объект: {house_name}\n"
+            f"🏢 Кв. {apt_num}, подъезд {contract.entrance}, этаж {contract.floor}\n"
+            f"📄 Договор: {contract.contract_num}\n"
             f"📅 Дата: {selected_date.strftime('%d.%m.%Y')}\n"
             f"⏰ Время: {time_str}"
         )
@@ -1014,6 +1044,303 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
 
 # ========== ПЕРЕКЛЮЧЕНИЕ ЯЗЫКА ==========
 
+
+async def _resend_cancel_selecting_booking(message: types.Message, user_id: int, lang: str):
+    """Переотправить список записей для отмены на новом языке"""
+    with SessionLocal() as session:
+        today = date.today()
+        bookings = (
+            session.query(Booking, Contract)
+            .join(Contract, Booking.contract_id == Contract.id)
+            .filter(
+                or_(
+                    Booking.user_telegram_id == user_id,
+                    Contract.telegram_id == user_id
+                ),
+                Booking.date >= today,
+                Booking.is_cancelled == False
+            )
+            .order_by(Booking.date, Booking.time_slot)
+            .all()
+        )
+
+        if not bookings:
+            return
+
+        builder = InlineKeyboardBuilder()
+        cancellable_found = False
+
+        if lang == 'uz':
+            text_lines = ["📋 **Sizning yozuvlaringiz:**\n"]
+        else:
+            text_lines = ["📋 **Ваши записи:**\n"]
+
+        for idx, (booking, contract) in enumerate(bookings, 1):
+            can_cancel_flag = can_cancel_booking(booking.date)
+            date_str = booking.date.strftime('%d.%m.%Y')
+            time_str = booking.time_slot.strftime('%H:%M')
+
+            if can_cancel_flag:
+                cancellable_found = True
+                text_lines.append(f"**{idx}.** 📅 {date_str} ⏰ {time_str}")
+                text_lines.append(f"    🏠 {contract.house_name}, кв. {contract.apt_num}\n")
+                builder.button(
+                    text=f"❌ Отменить #{idx}" if lang == 'ru' else f"❌ Bekor qilish #{idx}",
+                    callback_data=f"cancel_{booking.id}"
+                )
+            else:
+                text_lines.append(f"**{idx}.** 🔒 {date_str} ⏰ {time_str}")
+                text_lines.append(f"    🏠 {contract.house_name}, кв. {contract.apt_num}")
+                if lang == 'uz':
+                    text_lines.append(f"    _(bekor qilib bo'lmaydi)_\n")
+                else:
+                    text_lines.append(f"    _(отмена недоступна)_\n")
+
+        builder.button(text=get_message('back', lang), callback_data="cancel_back")
+        builder.adjust(1)
+
+        text = "\n".join(text_lines)
+        if not cancellable_found:
+            text += "\n" + get_message('all_bookings_blocked', lang)
+        else:
+            if lang == 'uz':
+                text += "\nBekor qilish uchun tugmani bosing:"
+            else:
+                text += "\nНажмите кнопку для отмены:"
+
+        await message.answer(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+
+
+async def _resend_cancel_confirming(message: types.Message, state: FSMContext, lang: str):
+    """Переотправить подтверждение отмены на новом языке"""
+    data = await state.get_data()
+    booking_id = data.get('cancel_booking_id')
+    if not booking_id:
+        return
+
+    with SessionLocal() as session:
+        booking = session.query(Booking).filter(Booking.id == booking_id).first()
+        if not booking:
+            return
+
+        date_str = booking.date.strftime('%d.%m.%Y')
+        time_str = booking.time_slot.strftime('%H:%M')
+
+        builder = InlineKeyboardBuilder()
+        builder.button(text=get_message('confirm', lang), callback_data=f"confirm_cancel_{booking_id}")
+        builder.button(text=get_message('reject', lang), callback_data="cancel_back")
+        builder.adjust(1)
+
+        await message.answer(
+            get_message('confirm_cancel', lang, date=date_str, time=time_str),
+            reply_markup=builder.as_markup()
+        )
+
+
+async def _resend_calendar_selecting_booking(message: types.Message, user_id: int, lang: str):
+    """Переотправить список записей для перезаписи на новом языке"""
+    today = date.today()
+
+    with SessionLocal() as session:
+        active_bookings = (
+            session.query(Booking)
+            .join(Contract, Booking.contract_id == Contract.id)
+            .filter(
+                or_(
+                    Booking.user_telegram_id == user_id,
+                    Contract.telegram_id == user_id
+                ),
+                Booking.date >= today,
+                Booking.is_cancelled == False
+            )
+            .order_by(Booking.date, Booking.time_slot)
+            .all()
+        )
+
+        if not active_bookings or len(active_bookings) < 2:
+            return
+
+        builder = InlineKeyboardBuilder()
+        for b in active_bookings:
+            contract = session.query(Contract).filter(Contract.id == b.contract_id).first()
+            date_str = b.date.strftime('%d.%m.%Y')
+            time_str = b.time_slot.strftime('%H:%M')
+            house = contract.house_name if contract else '?'
+            apt = contract.apt_num if contract else '?'
+            if lang == 'uz':
+                label = f"📅 {date_str} {time_str} | {house}, kv. {apt}"
+            else:
+                label = f"📅 {date_str} {time_str} | {house}, кв. {apt}"
+            builder.button(text=label, callback_data=f"calbooking_{b.id}")
+        builder.adjust(1)
+
+        await message.answer(
+            get_message('select_booking_rebook', lang),
+            reply_markup=builder.as_markup()
+        )
+
+
+async def _resend_calendar_viewing(message: types.Message, state: FSMContext, lang: str):
+    """Переотправить календарь на новом языке"""
+    data = await state.get_data()
+    delivery_date_str = data.get('cal_delivery_date')
+    slots_limit = data.get('cal_slots_limit', 1)
+    house_name = data.get('cal_house_name')
+
+    if not delivery_date_str or not house_name:
+        return
+
+    from datetime import datetime as dt
+    min_booking_date = dt.fromisoformat(delivery_date_str).date()
+    today = date.today()
+    start_date = min_booking_date
+    end_date = today + timedelta(days=90)
+
+    with SessionLocal() as session:
+        fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit, house_name)
+
+    markup = generate_calendar(
+        min_date=min_booking_date,
+        fully_booked_dates=fully_booked,
+        slots_limit=slots_limit,
+        lang=lang
+    )
+
+    await message.answer(
+        get_message('calendar_header', lang, house=house_name),
+        reply_markup=markup
+    )
+
+
+async def _resend_calendar_selecting_time(message: types.Message, state: FSMContext, lang: str):
+    """Переотправить слоты времени (calendar flow) на новом языке"""
+    data = await state.get_data()
+    selected_date_str = data.get('cal_selected_date')
+    house_name = data.get('cal_house_name')
+    slots_limit = data.get('cal_slots_limit', 1)
+    delivery_date_str = data.get('cal_delivery_date', '')
+
+    if not selected_date_str or not house_name:
+        return
+
+    selected_date = datetime.strptime(selected_date_str, '%Y-%m-%d').date()
+
+    with SessionLocal() as session:
+        bookings = (
+            session.query(Booking.time_slot, func.count(Booking.id))
+            .join(Contract, Booking.contract_id == Contract.id)
+            .filter(
+                Booking.date == selected_date,
+                Contract.house_name == house_name,
+                Booking.is_cancelled == False
+            )
+            .group_by(Booking.time_slot)
+            .all()
+        )
+        booked_dict = {row[0]: row[1] for row in bookings}
+
+    time_kb = generate_time_slots(selected_date_str, booked_dict, slots_limit, lang)
+
+    sel_date_fmt = selected_date.strftime('%d.%m.%Y')
+    if delivery_date_str:
+        from datetime import datetime as dt
+        del_date_fmt = dt.fromisoformat(delivery_date_str).date().strftime('%d.%m.%Y')
+    else:
+        del_date_fmt = '-'
+
+    message_text = get_message('date_selected_choose_time', lang,
+                               selected_date=sel_date_fmt,
+                               delivery_date=del_date_fmt)
+
+    await message.answer(message_text, reply_markup=time_kb, parse_mode="Markdown")
+
+
+async def _resend_calendar_rebook_confirming(message: types.Message, state: FSMContext, lang: str):
+    """Переотправить подтверждение перезаписи на новом языке"""
+    data = await state.get_data()
+    date_str = data.get('cal_selected_date')
+    time_str = data.get('cal_selected_time')
+    house_name = data.get('cal_house_name')
+    active_booking_date_str = data.get('cal_active_booking_date')
+    active_booking_time = data.get('cal_active_booking_time', '')
+    active_apt = data.get('cal_active_contract_apt', '')
+
+    if not date_str or not time_str or not active_booking_date_str:
+        return
+
+    from datetime import datetime as dt
+    active_date = dt.fromisoformat(active_booking_date_str).date()
+    selected_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=get_message('rebook_confirm_yes', lang),
+        callback_data=f"rebook_yes_{date_str}_{time_str}"
+    )
+    builder.button(
+        text=get_message('rebook_confirm_no', lang),
+        callback_data="rebook_no"
+    )
+    builder.adjust(1)
+
+    await message.answer(
+        get_message('rebook_confirm', lang,
+                   old_date=active_date.strftime('%d.%m.%Y'),
+                   old_time=active_booking_time,
+                   house=house_name,
+                   apt=active_apt,
+                   new_date=selected_date.strftime('%d.%m.%Y'),
+                   new_time=time_str),
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+
+
+async def _resend_selecting_time(message: types.Message, state: FSMContext, lang: str):
+    """Переотправить слоты времени (primary flow) на новом языке"""
+    data = await state.get_data()
+    selected_date_str = data.get('selected_date')
+    contract_id = data.get('contract_id')
+    house_name = data.get('house_name')
+    slots_limit = data.get('slots_limit', 1)
+
+    if not selected_date_str or not contract_id or not house_name:
+        return
+
+    selected_date = datetime.strptime(selected_date_str, '%Y-%m-%d').date()
+
+    with SessionLocal() as session:
+        contract = session.query(Contract).filter(Contract.id == contract_id).first()
+        if not contract:
+            return
+
+        bookings = (
+            session.query(Booking.time_slot, func.count(Booking.id))
+            .join(Contract, Booking.contract_id == Contract.id)
+            .filter(
+                Booking.date == selected_date,
+                Contract.house_name == house_name,
+                Booking.is_cancelled == False
+            )
+            .group_by(Booking.time_slot)
+            .all()
+        )
+        booked_dict = {row[0]: row[1] for row in bookings}
+
+        del_date_fmt = contract.delivery_date.strftime('%d.%m.%Y') if contract.delivery_date else '-'
+
+    time_kb = generate_time_slots(selected_date_str, booked_dict, slots_limit, lang)
+    sel_date_fmt = selected_date.strftime('%d.%m.%Y')
+
+    message_text = get_message('date_selected_choose_time', lang,
+                               selected_date=sel_date_fmt,
+                               delivery_date=del_date_fmt)
+
+    await message.answer(message_text, reply_markup=time_kb, parse_mode="Markdown")
+
+
+# --- Обработчики смены языка для каждого состояния ---
+
 @router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]), ClientSteps.entering_phone)
 async def language_toggle_during_phone(message: types.Message, state: FSMContext):
     """Переключение языка во время ввода телефона (без потери прогресса)"""
@@ -1025,11 +1352,9 @@ async def language_toggle_during_phone(message: types.Message, state: FSMContext
         reply_markup=get_phone_request_keyboard(new_lang)
     )
     
-    # Проверяем, есть ли сохранённый телефон
     saved_phone = get_user_phone(user_id)
     
     if saved_phone:
-        # Показываем выбор: использовать сохранённый или ввести новый
         builder = InlineKeyboardBuilder()
         builder.button(
             text=get_message('use_saved_phone', new_lang, phone=saved_phone),
@@ -1057,11 +1382,10 @@ async def language_toggle_during_contract(message: types.Message, state: FSMCont
     """Переключение языка во время ввода договора (без потери прогресса)"""
     user_id = message.from_user.id
     new_lang = toggle_language(user_id)
-    data = await state.get_data()
-    house_name = data.get('selected_house', '')
     
     await message.answer(
-        get_message('language_changed', new_lang)
+        get_message('language_changed', new_lang),
+        reply_markup=get_client_keyboard(new_lang)
     )
     await message.answer(
         get_message('enter_contract', new_lang)
@@ -1074,7 +1398,6 @@ async def language_toggle_during_date_selection(message: types.Message, state: F
     user_id = message.from_user.id
     new_lang = toggle_language(user_id)
     
-    # Получаем данные из состояния
     data = await state.get_data()
     delivery_date_str = data.get('delivery_date')
     slots_limit = data.get('slots_limit', 1)
@@ -1083,28 +1406,21 @@ async def language_toggle_during_date_selection(message: types.Message, state: F
     house_name = data.get('house_name')
     
     if not delivery_date_str or not contract_id:
-        # Если данных нет, просто меняем язык и возвращаем на главную
-        await state.clear()
         await message.answer(
             get_message('language_changed', new_lang),
             reply_markup=get_client_keyboard(new_lang)
         )
         return
     
-    # Пересоздаём календарь с новым языком
     from datetime import datetime as dt
     min_booking_date = dt.fromisoformat(delivery_date_str).date()
     today = date.today()
     
     with SessionLocal() as session:
-        # Определяем период для проверки занятых дат
         start_date = min_booking_date
         end_date = today + timedelta(days=90)
-        
-        # Получаем полностью занятые даты для проекта
         fully_booked = get_fully_booked_dates(session, start_date, end_date, slots_limit, house_name)
     
-    # Создаем новый календарь
     markup = generate_calendar(
         min_date=min_booking_date,
         fully_booked_dates=fully_booked,
@@ -1112,12 +1428,10 @@ async def language_toggle_during_date_selection(message: types.Message, state: F
         lang=new_lang
     )
     
-    # Отправляем уведомление о смене языка
     await message.answer(
-        get_message('language_changed', new_lang)
+        get_message('language_changed', new_lang),
+        reply_markup=get_client_keyboard(new_lang)
     )
-    
-    # Отправляем календарь с переведённым текстом
     await message.answer(
         get_message('contract_confirmed', new_lang,
                    fio=client_fio,
@@ -1126,16 +1440,145 @@ async def language_toggle_during_date_selection(message: types.Message, state: F
     )
 
 
+@router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]), ClientSteps.selecting_time)
+async def language_toggle_during_time_selection(message: types.Message, state: FSMContext):
+    """Переключение языка во время выбора времени"""
+    user_id = message.from_user.id
+    new_lang = toggle_language(user_id)
+
+    await message.answer(
+        get_message('language_changed', new_lang),
+        reply_markup=get_client_keyboard(new_lang)
+    )
+    await _resend_selecting_time(message, state, new_lang)
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]), ClientSteps.cancel_selecting_booking)
+async def language_toggle_during_cancel_selecting(message: types.Message, state: FSMContext):
+    """Переключение языка при выборе записи для отмены"""
+    user_id = message.from_user.id
+    new_lang = toggle_language(user_id)
+
+    await message.answer(
+        get_message('language_changed', new_lang),
+        reply_markup=get_client_keyboard(new_lang)
+    )
+    await _resend_cancel_selecting_booking(message, user_id, new_lang)
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]), ClientSteps.cancel_confirming)
+async def language_toggle_during_cancel_confirming(message: types.Message, state: FSMContext):
+    """Переключение языка при подтверждении отмены"""
+    user_id = message.from_user.id
+    new_lang = toggle_language(user_id)
+
+    await message.answer(
+        get_message('language_changed', new_lang),
+        reply_markup=get_client_keyboard(new_lang)
+    )
+    await _resend_cancel_confirming(message, state, new_lang)
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]), ClientSteps.calendar_selecting_booking)
+async def language_toggle_during_cal_selecting(message: types.Message, state: FSMContext):
+    """Переключение языка при выборе записи для перезаписи"""
+    user_id = message.from_user.id
+    new_lang = toggle_language(user_id)
+
+    await message.answer(
+        get_message('language_changed', new_lang),
+        reply_markup=get_client_keyboard(new_lang)
+    )
+    await _resend_calendar_selecting_booking(message, user_id, new_lang)
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]), ClientSteps.calendar_viewing)
+async def language_toggle_during_cal_viewing(message: types.Message, state: FSMContext):
+    """Переключение языка при просмотре календаря"""
+    user_id = message.from_user.id
+    new_lang = toggle_language(user_id)
+
+    await message.answer(
+        get_message('language_changed', new_lang),
+        reply_markup=get_client_keyboard(new_lang)
+    )
+    await _resend_calendar_viewing(message, state, new_lang)
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]), ClientSteps.calendar_selecting_time)
+async def language_toggle_during_cal_time(message: types.Message, state: FSMContext):
+    """Переключение языка при выборе времени (calendar flow)"""
+    user_id = message.from_user.id
+    new_lang = toggle_language(user_id)
+
+    await message.answer(
+        get_message('language_changed', new_lang),
+        reply_markup=get_client_keyboard(new_lang)
+    )
+    await _resend_calendar_selecting_time(message, state, new_lang)
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]), ClientSteps.calendar_rebook_confirming)
+async def language_toggle_during_cal_rebook(message: types.Message, state: FSMContext):
+    """Переключение языка при подтверждении перезаписи"""
+    user_id = message.from_user.id
+    new_lang = toggle_language(user_id)
+
+    await message.answer(
+        get_message('language_changed', new_lang),
+        reply_markup=get_client_keyboard(new_lang)
+    )
+    await _resend_calendar_rebook_confirming(message, state, new_lang)
+
+
+@router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]), ClientSteps.calendar_entering_phone)
+async def language_toggle_during_calendar_phone(message: types.Message, state: FSMContext):
+    """Переключение языка во время ввода телефона в режиме календаря"""
+    user_id = message.from_user.id
+    new_lang = toggle_language(user_id)
+
+    await message.answer(
+        get_message('language_changed', new_lang),
+        reply_markup=get_phone_request_keyboard(new_lang)
+    )
+
+    saved_phone = get_user_phone(user_id)
+
+    if saved_phone:
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text=get_message('use_saved_phone', new_lang, phone=saved_phone),
+            callback_data=f"calphone_{saved_phone}"
+        )
+        builder.button(
+            text=get_message('enter_new_phone', new_lang),
+            callback_data="calnewphone"
+        )
+        builder.adjust(1)
+
+        await message.answer(
+            get_message('phone_choice', new_lang),
+            reply_markup=builder.as_markup()
+        )
+    else:
+        await message.answer(
+            get_message('enter_phone', new_lang),
+            reply_markup=get_phone_request_keyboard(new_lang)
+        )
+
+
 @router.message(F.text.in_([BUTTON_TEXTS['language']['ru'], BUTTON_TEXTS['language']['uz']]))
 async def language_toggle_button(message: types.Message, state: FSMContext):
     """Переключение языка интерфейса"""
-    await state.clear()
     user_id = message.from_user.id
     new_lang = toggle_language(user_id)
     
     await message.answer(
         get_message('language_changed', new_lang),
         reply_markup=get_client_keyboard(new_lang)
+    )
+    await message.answer(
+        get_message('welcome', new_lang)
     )
 
 
@@ -1190,6 +1633,7 @@ async def cancel_booking_selected(callback: types.CallbackQuery, state: FSMConte
         builder.adjust(1)
         
         await state.set_state(ClientSteps.cancel_confirming)
+        await state.update_data(cancel_booking_id=booking_id)
         await callback.message.edit_text(
             get_message('confirm_cancel', lang, date=date_str, time=time_str),
             reply_markup=builder.as_markup()
@@ -1233,6 +1677,8 @@ async def confirm_cancel_booking(callback: types.CallbackQuery, state: FSMContex
             f"👤 Клиент: {contract.client_fio}\n"
             f"📞 Тел: {booking.client_phone}\n"
             f"🏠 Объект: {contract.house_name}\n"
+            f"🏢 Кв. {contract.apt_num}, подъезд {contract.entrance}, этаж {contract.floor}\n"
+            f"📄 Договор: {contract.contract_num}\n"
             f"📅 Дата: {date_str}\n"
             f"⏰ Время: {time_str}"
         )
@@ -1763,9 +2209,11 @@ async def process_phone_booking_callback(callback: types.CallbackQuery, state: F
         # Уведомление сотрудников
         notification_text = (
             f"🔔 **Новая запись на прием!**\n\n"
-            f"👤 Клиент: {user_data['client_fio']}\n"
+            f"👤 Клиент: {contract.client_fio}\n"
             f"📞 Тел: {user_phone}\n"
-            f"🏠 Объект: {user_data['selected_house']}\n"
+            f"🏠 Объект: {contract.house_name}\n"
+            f"🏢 Кв. {contract.apt_num}, подъезд {contract.entrance}, этаж {contract.floor}\n"
+            f"📄 Договор: {contract.contract_num}\n"
             f"📅 Дата: {selected_date.strftime('%d.%m.%Y')}\n"
             f"⏰ Время: {time_str}"
         )
@@ -1845,7 +2293,16 @@ async def phone_contact_received(message: types.Message, state: FSMContext, bot:
     if not user_phone.startswith('+'):
         user_phone = '+' + user_phone
     
-    await process_phone_booking(message, state, bot, user_phone)
+    is_valid, cleaned_phone = validate_phone_number(user_phone)
+    if not is_valid:
+        lang = get_user_language(message.from_user.id)
+        await message.answer(
+            get_message('invalid_phone', lang),
+            reply_markup=get_phone_request_keyboard(lang)
+        )
+        return
+    
+    await process_phone_booking(message, state, bot, cleaned_phone)
 
 
 @router.message(ClientSteps.entering_phone)
@@ -1902,9 +2359,11 @@ async def process_phone_booking(message: types.Message, state: FSMContext, bot: 
         # Уведомление сотрудников
         notification_text = (
             f"🔔 **Новая запись на прием!**\n\n"
-            f"👤 Клиент: {user_data['client_fio']}\n"
+            f"👤 Клиент: {contract.client_fio}\n"
             f"📞 Тел: {user_phone}\n"
-            f"🏠 Объект: {user_data['selected_house']}\n"
+            f"🏠 Объект: {contract.house_name}\n"
+            f"🏢 Кв. {contract.apt_num}, подъезд {contract.entrance}, этаж {contract.floor}\n"
+            f"📄 Договор: {contract.contract_num}\n"
             f"📅 Дата: {selected_date.strftime('%d.%m.%Y')}\n"
             f"⏰ Время: {time_str}"
         )

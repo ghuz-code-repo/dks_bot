@@ -715,6 +715,7 @@ async def show_project_settings(message: types.Message):
             ps = slots_dict.get(project)
             limit = ps.slots_limit if ps else "не установлен"
             address_ru = ps.address_ru if ps and ps.address_ru else "не установлен"
+            address_uz = ps.address_uz if ps and ps.address_uz else "не установлен"
             
             # Координаты
             if ps and ps.latitude and ps.longitude:
@@ -722,10 +723,19 @@ async def show_project_settings(message: types.Message):
             else:
                 coords = "не установлены"
             
-            text += f"🏘 **{project}**\n"
-            text += f"   └ Лимит: {limit}\n"
-            text += f"   └ Адрес: {address_ru[:40]}{'...' if len(address_ru) > 40 else ''}\n"
-            text += f"   └ Координаты: {coords}\n\n"
+            block = (
+                f"🏘 **{project}**\n"
+                f"   └ Лимит: {limit}\n"
+                f"   └ Адрес (RU): {address_ru}\n"
+                f"   └ Адрес (UZ): {address_uz}\n"
+                f"   └ Координаты: {coords}\n\n"
+            )
+            
+            # Telegram ограничивает сообщение до 4096 символов
+            if len(text) + len(block) > 4000:
+                await message.answer(text, parse_mode="Markdown")
+                text = ""
+            text += block
         
         await message.answer(text, parse_mode="Markdown", reply_markup=get_admin_keyboard())
 

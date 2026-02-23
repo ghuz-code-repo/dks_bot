@@ -152,8 +152,8 @@ MESSAGES = {
         'uz': '📱 Telefon raqamingizni yuboring yoki qo\'lda kiriting:'
     },
     'invalid_phone': {
-        'ru': '❌ Неверный формат номера телефона. Попробуйте снова.',
-        'uz': '❌ Telefon raqami formati noto\'g\'ri. Qayta urinib ko\'ring.'
+        'ru': '❌ Допускаются только номера Узбекистана (+998), России (+7) и Казахстана (+7). Попробуйте снова.',
+        'uz': '❌ Faqat O\'zbekiston (+998), Rossiya (+7) va Qozog\'iston (+7) raqamlari qabul qilinadi. Qayta urinib ko\'ring.'
     },
     'phone_choice': {
         'ru': '📱 Использовать сохранённый номер или ввести новый?',
