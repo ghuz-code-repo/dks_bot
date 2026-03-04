@@ -64,7 +64,7 @@ def get_slots_management_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton(text="🔙 Назад")],
         [KeyboardButton(text="📝 Установить лимит для проекта"), KeyboardButton(text="📍 Установить адрес проекта")],
         [KeyboardButton(text="🗺 Установить координаты проекта"), KeyboardButton(text="📄 Изменить список договоров")],
-        [KeyboardButton(text="📊 Текущие настройки проектов")]
+        [KeyboardButton(text="🎉 Праздничные дни"), KeyboardButton(text="📊 Текущие настройки проектов")],
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 

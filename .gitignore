@@ -13,3 +13,5 @@ debug_parse.py
 find_client.py
 data_test/comparison_result.xlsx
 data_test/result.json
+data/*.xlsx
+data_test/*.xlsx

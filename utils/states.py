@@ -62,6 +62,9 @@ class AdminSteps(StatesGroup):
     update_contracts_confirming = State()
     update_contracts_reviewing = State()
 
+    # Управление праздничными днями
+    holidays_waiting_excel = State()
+
 
 class EmployeeSteps(StatesGroup):
     """Состояния для работы панели сотрудника"""

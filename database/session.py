@@ -63,3 +63,12 @@ def _run_migrations():
         if project_slots_columns and 'longitude' not in project_slots_columns:
             conn.execute(text("ALTER TABLE project_slots ADD COLUMN longitude TEXT"))
             conn.commit()
+
+        # Создаём таблицу holidays если её ещё нет
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS holidays ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "date DATE UNIQUE NOT NULL, "
+            "description TEXT)"
+        ))
+        conn.commit()

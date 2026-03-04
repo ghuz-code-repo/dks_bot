@@ -4,6 +4,14 @@ from sqlalchemy.orm import relationship, declarative_base
 Base = declarative_base()
 
 
+class Holiday(Base):
+    """Праздничные/нерабочие дни"""
+    __tablename__ = 'holidays'
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, unique=True, nullable=False, index=True)
+    description = Column(String, nullable=True)  # Описание праздника
+
+
 class UserLanguage(Base):
     """Настройки пользователей (язык, телефон)"""
     __tablename__ = 'user_languages'

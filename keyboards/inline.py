@@ -2,6 +2,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import time, datetime, timedelta, date, timezone
 import calendar
 from aiogram import types
+from utils.holidays import get_holiday_dates
 
 # Часовой пояс Ташкента (UTC+5)
 TASHKENT_TZ = timezone(timedelta(hours=5))
@@ -12,9 +13,11 @@ SLOTS_PER_DAY = len(TIME_SLOTS)  # 6 слотов
 
 
 def get_next_working_day(from_date: date) -> date:
-    """Возвращает следующий рабочий день после указанной даты"""
+    """Возвращает следующий рабочий день после указанной даты (пропускает выходные и праздники)"""
+    # Получаем праздничные дни на ближайшие 30 дней
+    holiday_dates = get_holiday_dates(from_date, from_date + timedelta(days=30))
     next_day = from_date + timedelta(days=1)
-    while next_day.weekday() >= 5:  # Пропускаем выходные (5=Сб, 6=Вс)
+    while next_day.weekday() >= 5 or next_day in holiday_dates:  # Пропускаем выходные и праздники
         next_day += timedelta(days=1)
     return next_day
 
@@ -155,7 +158,7 @@ def generate_houses_kb(houses):
 def generate_calendar(year: int = None, month: int = None, min_date: date = None, 
                       fully_booked_dates: set = None, slots_limit: int = 1, lang: str = 'ru'):
     """
-    Генерация календаря с учётом занятых дат.
+    Генерация календаря с учётом занятых дат и праздников.
     
     Args:
         year: Год для отображения
@@ -186,6 +189,11 @@ def generate_calendar(year: int = None, month: int = None, min_date: date = None
     if date(year, month, calendar.monthrange(year, month)[1]) < effective_min_date:
         year = effective_min_date.year
         month = effective_min_date.month
+
+    # Получаем праздничные дни для текущего месяца
+    month_start = date(year, month, 1)
+    month_end = date(year, month, calendar.monthrange(year, month)[1])
+    holiday_dates = get_holiday_dates(month_start, month_end)
 
     builder = InlineKeyboardBuilder()
 
@@ -225,11 +233,13 @@ def generate_calendar(year: int = None, month: int = None, min_date: date = None
                 current_date = date(year, month, day)
                 # Кнопка активна ТОЛЬКО если:
                 # 1. Это рабочий день (пн-пт)
-                # 2. Дата >= минимальной даты записи (с учётом правила 12:00)
-                # 3. Дата >= даты сдачи объекта (если указана)
-                # 4. На эту дату есть свободные слоты
+                # 2. Не праздничный день
+                # 3. Дата >= минимальной даты записи (с учётом правила 12:00)
+                # 4. Дата >= даты сдачи объекта (если указана)
+                # 5. На эту дату есть свободные слоты
                 is_weekday = current_date.weekday() < 5
-                is_date_valid = is_weekday and current_date >= effective_min_date
+                is_holiday = current_date in holiday_dates
+                is_date_valid = is_weekday and not is_holiday and current_date >= effective_min_date
                 is_fully_booked = current_date in fully_booked_dates
 
                 if is_date_valid and not is_fully_booked:

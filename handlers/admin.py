@@ -17,6 +17,7 @@ from database.models import Booking, Contract
 from database.models import Setting
 from database.session import SessionLocal
 from utils.excel_reader import process_excel_file, analyze_excel_changes, apply_contract_changes
+from utils.holidays import generate_holidays_excel, import_holidays_from_excel, get_all_holidays
 from utils.states import AdminSteps
 from keyboards.reply import (
     get_admin_keyboard, get_staff_management_keyboard, 
@@ -51,7 +52,8 @@ ADMIN_MENU_BUTTONS = [
     "📄 Изменить список договоров",
     "📊 Текущие настройки проектов", "🔙 Назад",
     "➕ Добавить администратора", "➕ Добавить сотрудника",
-    "📋 Список персонала", "❌ Удалить из персонала"
+    "📋 Список персонала", "❌ Удалить из персонала",
+    "🎉 Праздничные дни"
 ]
 
 
@@ -83,6 +85,8 @@ async def reset_state_on_menu_button(message: types.Message, state: FSMContext):
         await start_set_project_coordinates(message, state)
     elif text == "📄 Изменить список договоров":
         await start_update_contracts(message, state)
+    elif text == "🎉 Праздничные дни":
+        await start_holidays_management(message, state)
     elif text == "➕ Добавление проектов":
         await start_add_project(message, state)
     elif text == "🏠 Список проектов":
@@ -168,6 +172,7 @@ async def _handle_back_navigation(message: types.Message, state: FSMContext):
         AdminSteps.selecting_project_for_address,
         AdminSteps.edit_project_select,
         AdminSteps.update_contracts_selecting_project,
+        AdminSteps.holidays_waiting_excel,
     ):
         await state.clear()
         await message.answer("⚙️ Настройки проектов\n\nВыберите действие:", reply_markup=get_slots_management_keyboard())
@@ -2434,3 +2439,133 @@ async def process_project_excel_wrong_type(message: types.Message, state: FSMCon
         return await message.answer("❌ Добавление проекта отменено.", reply_markup=get_admin_keyboard())
     
     await message.answer("⚠️ Пожалуйста, отправьте Excel файл (.xlsx или .xls)")
+
+
+# =============================================================================
+# Управление праздничными днями
+# =============================================================================
+
+@router.message(F.text == "🎉 Праздничные дни")
+async def start_holidays_management(message: types.Message, state: FSMContext):
+    """Начало управления праздничными днями: отправляет шаблон Excel и ждёт файл."""
+    await state.clear()
+
+    loading_msg = await message.answer("⏳ Формирую файл с текущими праздниками...")
+
+    try:
+        template_path = generate_holidays_excel()
+        holidays = get_all_holidays()
+
+        await loading_msg.delete()
+
+        if holidays:
+            holidays_text = "\n".join(
+                f"  • {h.date.strftime('%d.%m.%Y')}" + (f" — {h.description}" if h.description else "")
+                for h in holidays
+            )
+            caption = (
+                f"🎉 **Праздничные дни** ({len(holidays)} шт.)\n\n"
+                f"{holidays_text}\n\n"
+                "📥 Отправьте обновлённый файл, чтобы **полностью заменить** список праздников.\n"
+                "Если файл будет пустой (только заголовки) — все праздники будут удалены."
+            )
+        else:
+            caption = (
+                "🎉 **Праздничные дни**\n\n"
+                "Сейчас праздничных дней нет.\n\n"
+                "📥 Заполните шаблон и отправьте обратно, чтобы добавить праздничные дни.\n"
+                "Формат: столбец «Дата» (ДД.ММ.ГГГГ), столбец «Описание» (необязательно)."
+            )
+
+        doc = FSInputFile(template_path, filename="holidays_template.xlsx")
+        await message.answer_document(
+            document=doc,
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=get_slots_management_keyboard()
+        )
+
+        await state.set_state(AdminSteps.holidays_waiting_excel)
+
+    except Exception as e:
+        logging.error(f"Ошибка при формировании шаблона праздников: {e}")
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+        await message.answer(
+            f"❌ Ошибка при формировании файла: {e}",
+            reply_markup=get_slots_management_keyboard()
+        )
+
+
+@router.message(AdminSteps.holidays_waiting_excel, F.document)
+async def holidays_process_excel(message: types.Message, bot: Bot, state: FSMContext):
+    """Обработка Excel-файла с праздниками."""
+    if not message.document.file_name.endswith(('.xlsx', '.xls')):
+        return await message.answer("⚠️ Пожалуйста, отправьте файл в формате Excel (.xlsx или .xls)")
+
+    loading_msg = await message.answer("⏳ Обрабатываю файл с праздниками...")
+
+    file_path = f"data/temp_holidays_{message.document.file_name}"
+    try:
+        file = await bot.get_file(message.document.file_id)
+        await bot.download_file(file.file_path, file_path)
+
+        count = import_holidays_from_excel(file_path)
+
+        await loading_msg.delete()
+
+        if count > 0:
+            holidays = get_all_holidays()
+            holidays_text = "\n".join(
+                f"  • {h.date.strftime('%d.%m.%Y')}" + (f" — {h.description}" if h.description else "")
+                for h in holidays
+            )
+            await message.answer(
+                f"✅ Список праздничных дней обновлён!\n\n"
+                f"Загружено праздников: **{count}**\n\n"
+                f"{holidays_text}",
+                parse_mode="Markdown",
+                reply_markup=get_slots_management_keyboard()
+            )
+        else:
+            await message.answer(
+                "✅ Список праздничных дней очищен (файл не содержит дат).",
+                reply_markup=get_slots_management_keyboard()
+            )
+
+        await state.clear()
+
+    except ValueError as e:
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+        await message.answer(
+            f"⚠️ Ошибка в данных файла:\n\n{e}\n\n"
+            "Исправьте файл и отправьте повторно.",
+            reply_markup=get_slots_management_keyboard()
+        )
+    except Exception as e:
+        logging.error(f"Ошибка при импорте праздников: {e}")
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+        await message.answer(
+            f"❌ Ошибка при обработке файла: {e}\n\n"
+            "Отправьте корректный Excel-файл или нажмите «🔙 Назад».",
+            reply_markup=get_slots_management_keyboard()
+        )
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+
+@router.message(AdminSteps.holidays_waiting_excel)
+async def holidays_wrong_type(message: types.Message, state: FSMContext):
+    """Обработка неверного типа сообщения при ожидании Excel."""
+    await message.answer(
+        "⚠️ Пожалуйста, отправьте Excel-файл (.xlsx или .xls) с праздничными днями."
+    )
