@@ -252,8 +252,8 @@ MESSAGES = {
         'uz': '🔔 Eslatma!\n\nErtaga sizda kalitlarni olish uchun yozuv bor.\n\n📅 Sana: {date}\n⏰ Vaqt: {time}\n📍 Manzil: {address}'
     },
     'reminder_hour': {
-        'ru': '🔔 Напоминание!\n\nЧерез час у вас запись на получение ключей.\n\n📅 Дата: {date}\n⏰ Время: {time}\n📍 Адрес: {address}',
-        'uz': '🔔 Eslatma!\n\nBir soatdan keyin sizda kalitlarni olish uchun yozuv bor.\n\n📅 Sana: {date}\n⏰ Vaqt: {time}\n📍 Manzil: {address}'
+        'ru': '🔔 Напоминание!\n\nЧерез 3 часа у вас запись на получение ключей.\n\n📅 Дата: {date}\n⏰ Время: {time}\n📍 Адрес: {address}',
+        'uz': '🔔 Eslatma!\n\n3 soatdan keyin sizda kalitlarni olish uchun yozuv bor.\n\n📅 Sana: {date}\n⏰ Vaqt: {time}\n📍 Manzil: {address}'
     },
     
     # Нет доступных ЖК
