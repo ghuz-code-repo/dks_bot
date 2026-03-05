@@ -593,8 +593,11 @@ async def rebook_declined(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     lang = get_user_language(user_id)
 
-    await callback.message.edit_text(get_message('rebook_cancelled', lang))
     await state.clear()
+    try:
+        await callback.message.edit_text(get_message('rebook_cancelled', lang))
+    except Exception:
+        pass
     await callback.message.answer(
         get_message('welcome', lang),
         reply_markup=get_client_keyboard(lang)
@@ -1590,7 +1593,10 @@ async def cancel_back_handler(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     lang = get_user_language(user_id)
     await state.clear()
-    await callback.message.edit_text(get_message('cancel_aborted', lang))
+    try:
+        await callback.message.edit_text(get_message('cancel_aborted', lang))
+    except Exception:
+        pass
     await callback.message.answer(
         get_message('welcome', lang),
         reply_markup=get_client_keyboard(lang)
@@ -1607,6 +1613,23 @@ async def cancel_blocked_handler(callback: types.CallbackQuery):
         get_message('all_bookings_blocked', lang)[:200],  # Telegram limit
         show_alert=True
     )
+
+
+@router.callback_query(F.data == "cancel_back", ClientSteps.cancel_confirming)
+async def cancel_back_from_confirming(callback: types.CallbackQuery, state: FSMContext):
+    """Возврат в главное меню из подтверждения отмены"""
+    user_id = callback.from_user.id
+    lang = get_user_language(user_id)
+    await state.clear()
+    try:
+        await callback.message.edit_text(get_message('cancel_aborted', lang))
+    except Exception:
+        pass
+    await callback.message.answer(
+        get_message('welcome', lang),
+        reply_markup=get_client_keyboard(lang)
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("cancel_"), ClientSteps.cancel_selecting_booking)
@@ -1651,14 +1674,20 @@ async def confirm_cancel_booking(callback: types.CallbackQuery, state: FSMContex
     with SessionLocal() as session:
         booking = session.query(Booking).filter(Booking.id == booking_id).first()
         if not booking:
+            await state.clear()
             await callback.answer("Запись не найдена", show_alert=True)
             return
         
         # Проверяем возможность отмены ещё раз
         if not can_cancel_booking(booking.date):
+            await state.clear()
             await callback.answer(
                 "⚠️ Отмена невозможна - прошёл срок отмены",
                 show_alert=True
+            )
+            await callback.message.answer(
+                get_message('welcome', lang),
+                reply_markup=get_client_keyboard(lang)
             )
             return
         
@@ -1698,9 +1727,12 @@ async def confirm_cancel_booking(callback: types.CallbackQuery, state: FSMContex
         asyncio.create_task(send_cancel_notifications())
     
     await state.clear()
-    await callback.message.edit_text(
-        get_message('booking_cancelled', lang, date=date_str, time=time_str)
-    )
+    try:
+        await callback.message.edit_text(
+            get_message('booking_cancelled', lang, date=date_str, time=time_str)
+        )
+    except Exception:
+        pass
     await callback.message.answer(
         get_message('welcome', lang),
         reply_markup=get_client_keyboard(lang)
@@ -1762,11 +1794,13 @@ async def contract_entered(message: types.Message, state: FSMContext):
                 )
                 return
             else:
-                # Это владелец договора или владелец неизвестен - у него уже есть активная запись
-                await message.answer(
-                    get_message('has_active_booking', lang, date=existing_booking.date.strftime('%d.%m.%Y'))
+                # Это владелец договора — автоматически отменяем старую запись и продолжаем
+                existing_booking.is_cancelled = True
+                session.commit()
+                logging.info(
+                    f"Автоотмена записи #{existing_booking.id} (user={user_id}, "
+                    f"date={existing_booking.date}) при повторной первичной записи"
                 )
-                return
         
         # Проверяем прошлые записи для определения владельца и периода ожидания
         # Учитываем только неотменённые записи — если админ отменил запись и отвязал ТГ,

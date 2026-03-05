@@ -401,3 +401,138 @@ class TestContractEnteredAfterCancellation:
             f"С неотменённой записью min_date должна быть {expected_min}, "
             f"а получили {stored_date}"
         )
+
+    @pytest.mark.asyncio
+    @patch("handlers.client.get_message", return_value="test")
+    @patch("handlers.client.get_fully_booked_dates", return_value=set())
+    @patch("handlers.client.generate_calendar", return_value=MagicMock())
+    @patch("handlers.client.get_user_language", return_value="ru")
+    @patch("handlers.client.get_min_booking_date")
+    async def test_active_booking_auto_cancelled_on_rebooking(
+        self, mock_min_booking_date, mock_lang, mock_calendar,
+        mock_booked_dates, mock_get_message, db_engine
+    ):
+        """
+        Сценарий:
+        1. У пользователя есть активная (неотменённая) запись на будущую дату
+        2. Пользователь вводит тот же договор через «первичная запись»
+
+        Ожидание: старая запись автоматически отменяется,
+        пользователь продолжает к выбору даты.
+        """
+        from handlers.client import contract_entered
+
+        base_min = date(2026, 3, 10)
+        mock_min_booking_date.return_value = base_min
+
+        Factory = sessionmaker(bind=db_engine)
+        with Factory() as s:
+            c = Contract(
+                id=30, house_name="ЖК Авто", apt_num="77",
+                entrance="1", floor=5, contract_num="AUTO-001",
+                client_fio="Иванов Иван", delivery_date=date(2026, 1, 1),
+                telegram_id=USER_ID,
+            )
+            s.add(c)
+            s.flush()
+            # Активная запись на будущую дату
+            active_booking = Booking(
+                contract_id=c.id, user_telegram_id=USER_ID,
+                date=base_min + timedelta(days=3),
+                time_slot=time(10, 0), client_phone="+998900000000",
+                is_cancelled=False,
+            )
+            s.add(active_booking)
+            s.add(ProjectSlots(project_name="ЖК Авто", slots_limit=1))
+            s.commit()
+            active_booking_id = active_booking.id
+
+        mock_message = AsyncMock()
+        mock_message.text = "AUTO-001"
+        mock_message.from_user.id = USER_ID
+
+        captured_data = {}
+        async def capture_update_data(**kwargs):
+            captured_data.update(kwargs)
+
+        mock_state = AsyncMock()
+        mock_state.get_data = AsyncMock(return_value={})
+        mock_state.update_data = capture_update_data
+
+        with patch("handlers.client.SessionLocal", Factory):
+            await contract_entered(mock_message, mock_state)
+
+        # Проверяем: хендлер дошёл до календаря (не заблокировал)
+        assert "delivery_date" in captured_data, \
+            "Хендлер должен пройти дальше, а не блокировать сообщением has_active_booking"
+
+        # Проверяем: старая запись отменена в БД
+        with Factory() as s:
+            booking = s.query(Booking).filter(Booking.id == active_booking_id).first()
+            assert booking.is_cancelled is True, \
+                "Активная запись должна быть автоматически отменена"
+
+    @pytest.mark.asyncio
+    @patch("handlers.client.get_message", return_value="test")
+    @patch("handlers.client.get_fully_booked_dates", return_value=set())
+    @patch("handlers.client.generate_calendar", return_value=MagicMock())
+    @patch("handlers.client.get_user_language", return_value="ru")
+    @patch("handlers.client.get_min_booking_date")
+    async def test_rebooking_with_telegram_id_set_no_two_week_wait(
+        self, mock_min_booking_date, mock_lang, mock_calendar,
+        mock_booked_dates, mock_get_message, db_engine
+    ):
+        """
+        Сценарий:
+        1. У пользователя была запись, contract.telegram_id уже установлен
+        2. Запись была отменена
+        3. Пользователь вводит тот же договор через «первичная запись»
+
+        Ожидание: отсутствие 2-недельного ожидания (отменённые не считаются).
+        """
+        from handlers.client import contract_entered
+
+        base_min = date(2026, 3, 10)
+        mock_min_booking_date.return_value = base_min
+
+        Factory = sessionmaker(bind=db_engine)
+        with Factory() as s:
+            c = Contract(
+                id=40, house_name="ЖК ТГ", apt_num="15",
+                entrance="2", floor=3, contract_num="TG-001",
+                client_fio="Сидоров Сергей", delivery_date=date(2026, 1, 1),
+                telegram_id=USER_ID,
+            )
+            s.add(c)
+            s.flush()
+            s.add(Booking(
+                contract_id=c.id, user_telegram_id=USER_ID,
+                date=base_min + timedelta(days=1),
+                time_slot=time(10, 0), client_phone="+998900000000",
+                is_cancelled=True,
+            ))
+            s.add(ProjectSlots(project_name="ЖК ТГ", slots_limit=1))
+            s.commit()
+
+        mock_message = AsyncMock()
+        mock_message.text = "TG-001"
+        mock_message.from_user.id = USER_ID
+
+        captured_data = {}
+        async def capture_update_data(**kwargs):
+            captured_data.update(kwargs)
+
+        mock_state = AsyncMock()
+        mock_state.get_data = AsyncMock(return_value={})
+        mock_state.update_data = capture_update_data
+
+        with patch("handlers.client.SessionLocal", Factory):
+            await contract_entered(mock_message, mock_state)
+
+        assert "delivery_date" in captured_data, \
+            "Хендлер должен дойти до календаря даже при установленном telegram_id"
+        stored_date = date.fromisoformat(captured_data["delivery_date"])
+        assert stored_date == base_min, (
+            f"При telegram_id и только отменённых записях min_date={base_min}, "
+            f"получили {stored_date}"
+        )
