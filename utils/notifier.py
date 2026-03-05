@@ -32,7 +32,8 @@ async def check_reminders(bot: Bot):
         tomorrow = today + timedelta(days=1)
         day_bookings = session.query(Booking).filter(
             Booking.date == tomorrow,
-            Booking.reminder_day_sent == False
+            Booking.reminder_day_sent == False,
+            Booking.is_cancelled == False
         ).all()
 
         async def send_day_reminder(telegram_id, message_text):
@@ -68,7 +69,8 @@ async def check_reminders(bot: Bot):
         hour_threshold = now + timedelta(hours=3)
         urgent_bookings = session.query(Booking).filter(
             Booking.date == today,
-            Booking.reminder_hour_sent == False
+            Booking.reminder_hour_sent == False,
+            Booking.is_cancelled == False
         ).all()
 
         async def send_hour_reminder(telegram_id, message_text):
