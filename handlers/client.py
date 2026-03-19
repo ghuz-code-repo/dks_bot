@@ -12,7 +12,8 @@ from sqlalchemy import func, or_
 from config import ADMIN_ID, DKS_CONTACTS
 from database.models import Booking, Setting, Contract, Staff, ProjectSlots
 from database.session import SessionLocal
-from keyboards.inline import generate_time_slots, generate_calendar, get_min_booking_date, get_fully_booked_dates, SLOTS_PER_DAY
+from keyboards.inline import generate_time_slots, generate_calendar, get_min_booking_date, get_fully_booked_dates, SLOTS_PER_DAY, TASHKENT_TZ
+from utils.holidays import get_holiday_dates
 from keyboards.reply import get_phone_request_keyboard, get_client_keyboard, BUTTON_TEXTS
 from utils.states import ClientSteps
 from utils.language import get_user_language, toggle_language, get_message, get_user_phone, set_user_phone
@@ -125,8 +126,14 @@ def get_min_cancellation_date() -> date:
     return get_min_booking_date()
 
 
-def can_cancel_booking(booking_date: date) -> bool:
+def can_cancel_booking(booking_date: date, booking_time) -> bool:
     """Проверяет, можно ли отменить запись на указанную дату"""
+    # Если запись на выходной или праздник — можно отменить до времени записи
+    holiday_dates = get_holiday_dates(booking_date, booking_date)
+    if booking_date.weekday() >= 5 or booking_date in holiday_dates:
+        now = datetime.now(TASHKENT_TZ)
+        booking_dt = datetime.combine(booking_date, booking_time, tzinfo=TASHKENT_TZ)
+        return now < booking_dt
     min_date = get_min_cancellation_date()
     return booking_date >= min_date
 
@@ -188,7 +195,7 @@ async def cancel_booking_button(message: types.Message, state: FSMContext):
             text_lines = ["📋 **Ваши записи:**\n"]
         
         for idx, (booking, contract) in enumerate(bookings, 1):
-            can_cancel = can_cancel_booking(booking.date)
+            can_cancel = can_cancel_booking(booking.date, booking.time_slot)
             date_str = booking.date.strftime('%d.%m.%Y')
             time_str = booking.time_slot.strftime('%H:%M')
             
@@ -1079,7 +1086,7 @@ async def _resend_cancel_selecting_booking(message: types.Message, user_id: int,
             text_lines = ["📋 **Ваши записи:**\n"]
 
         for idx, (booking, contract) in enumerate(bookings, 1):
-            can_cancel_flag = can_cancel_booking(booking.date)
+            can_cancel_flag = can_cancel_booking(booking.date, booking.time_slot)
             date_str = booking.date.strftime('%d.%m.%Y')
             time_str = booking.time_slot.strftime('%H:%M')
 
@@ -1679,7 +1686,7 @@ async def confirm_cancel_booking(callback: types.CallbackQuery, state: FSMContex
             return
         
         # Проверяем возможность отмены ещё раз
-        if not can_cancel_booking(booking.date):
+        if not can_cancel_booking(booking.date, booking.time_slot):
             await state.clear()
             await callback.answer(
                 "⚠️ Отмена невозможна - прошёл срок отмены",
