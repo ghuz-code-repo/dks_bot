@@ -1801,11 +1801,11 @@ async def contract_entered(message: types.Message, state: FSMContext):
                 )
                 return
             else:
-                # Это владелец договора — автоматически отменяем старую запись и продолжаем
-                existing_booking.is_cancelled = True
-                session.commit()
+                # Это владелец договора — запоминаем ID старой записи для отложенной отмены
+                # Отмена произойдёт только при создании новой записи (атомарно)
+                await state.update_data(pending_cancel_booking_id=existing_booking.id)
                 logging.info(
-                    f"Автоотмена записи #{existing_booking.id} (user={user_id}, "
+                    f"Отложенная отмена записи #{existing_booking.id} (user={user_id}, "
                     f"date={existing_booking.date}) при повторной первичной записи"
                 )
         
@@ -2236,6 +2236,17 @@ async def process_phone_booking_callback(callback: types.CallbackQuery, state: F
         if contract and not contract.telegram_id:
             contract.telegram_id = user_id
         
+        # Отложенная отмена старой записи (если есть) — атомарно с созданием новой
+        pending_cancel_id = user_data.get('pending_cancel_booking_id')
+        if pending_cancel_id:
+            old_booking = session.query(Booking).filter(Booking.id == pending_cancel_id).first()
+            if old_booking and not old_booking.is_cancelled:
+                old_booking.is_cancelled = True
+                logging.info(
+                    f"Автоотмена записи #{old_booking.id} (user={user_id}, "
+                    f"date={old_booking.date}) при создании новой записи"
+                )
+
         # Сохранение записи в базу данных
         new_booking = Booking(
             contract_id=user_data['contract_id'],
@@ -2386,6 +2397,17 @@ async def process_phone_booking(message: types.Message, state: FSMContext, bot: 
         if contract and not contract.telegram_id:
             contract.telegram_id = user_id
         
+        # Отложенная отмена старой записи (если есть) — атомарно с созданием новой
+        pending_cancel_id = user_data.get('pending_cancel_booking_id')
+        if pending_cancel_id:
+            old_booking = session.query(Booking).filter(Booking.id == pending_cancel_id).first()
+            if old_booking and not old_booking.is_cancelled:
+                old_booking.is_cancelled = True
+                logging.info(
+                    f"Автоотмена записи #{old_booking.id} (user={user_id}, "
+                    f"date={old_booking.date}) при создании новой записи"
+                )
+
         # Сохранение записи в базу данных
         new_booking = Booking(
             contract_id=user_data['contract_id'],

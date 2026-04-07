@@ -422,7 +422,7 @@ class TestContractEnteredAfterCancellation:
         """
         from handlers.client import contract_entered
 
-        base_min = date(2026, 3, 10)
+        base_min = date.today() + timedelta(days=7)
         mock_min_booking_date.return_value = base_min
 
         Factory = sessionmaker(bind=db_engine)
@@ -466,11 +466,15 @@ class TestContractEnteredAfterCancellation:
         assert "delivery_date" in captured_data, \
             "Хендлер должен пройти дальше, а не блокировать сообщением has_active_booking"
 
-        # Проверяем: старая запись отменена в БД
+        # Проверяем: старая запись НЕ отменена сразу — отмена отложена до создания новой записи
         with Factory() as s:
             booking = s.query(Booking).filter(Booking.id == active_booking_id).first()
-            assert booking.is_cancelled is True, \
-                "Активная запись должна быть автоматически отменена"
+            assert booking.is_cancelled is False, \
+                "Активная запись не должна отменяться сразу — отмена отложена до создания новой"
+
+        # Проверяем: ID старой записи сохранён в FSM для отложенной отмены
+        assert captured_data.get('pending_cancel_booking_id') == active_booking_id, \
+            "ID старой записи должен быть сохранён в FSM state для отложенной отмены"
 
     @pytest.mark.asyncio
     @patch("handlers.client.get_message", return_value="test")
