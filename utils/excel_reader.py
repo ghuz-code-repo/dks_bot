@@ -95,7 +95,10 @@ def process_excel_file(file_path, project_name=None, address_ru=None, address_uz
     
     with SessionLocal() as session:
         for _, row in df.iterrows():
-            clean_contract = "".join(str(row[col_map['Номер договора']]).split()).upper()
+            raw_contract = row[col_map['Номер договора']]
+            if pd.isna(raw_contract) or str(raw_contract).strip() == '':
+                continue
+            clean_contract = "".join(str(raw_contract).split()).upper()
 
             # Преобразование даты сдачи
             raw_delivery_date = row[col_map['Дата сдачи']]
@@ -227,7 +230,10 @@ def analyze_excel_changes(file_path, project_name):
                 continue
 
             apt_num = _clean_str(row[col_map['Номер квартиры']])
-            clean_contract = "".join(str(row[col_map['Номер договора']]).split()).upper()
+            raw_contract = row[col_map['Номер договора']]
+            if pd.isna(raw_contract) or str(raw_contract).strip() == '':
+                continue
+            clean_contract = "".join(str(raw_contract).split()).upper()
 
             raw_delivery_date = row[col_map['Дата сдачи']]
             if isinstance(raw_delivery_date, str):
