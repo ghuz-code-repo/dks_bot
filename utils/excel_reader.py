@@ -16,6 +16,18 @@ EXPECTED_COLUMNS = [
 ]
 
 
+def _clean_str(value):
+    """Преобразует значение из Excel в строку, убирая дробную часть у целых чисел (1.0 -> '1')."""
+    s = str(value).strip()
+    try:
+        f = float(s)
+        if f == int(f):
+            return str(int(f))
+    except (ValueError, OverflowError):
+        pass
+    return s
+
+
 def _detect_columns(df):
     """
     Определяет маппинг столбцов.
@@ -92,7 +104,7 @@ def process_excel_file(file_path, project_name=None, address_ru=None, address_uz
             else:
                 delivery_date = raw_delivery_date.date()
 
-            house_name = str(row[col_map['Название дома']])
+            house_name = str(row[col_map['Название дома']]).strip()
             
             # Определяем название проекта
             if detected_project is None:
@@ -106,8 +118,8 @@ def process_excel_file(file_path, project_name=None, address_ru=None, address_uz
 
             data = {
                 "house_name": house_name,
-                "apt_num": str(row[col_map['Номер квартиры']]),
-                "entrance": str(row[col_map['Подъезд']]),
+                "apt_num": _clean_str(row[col_map['Номер квартиры']]),
+                "entrance": _clean_str(row[col_map['Подъезд']]),
                 "floor": int(row[col_map['Этаж']]),
                 "contract_num": clean_contract,
                 "client_fio": str(row[col_map['ФИО клиента']]),
@@ -176,12 +188,12 @@ def analyze_excel_changes(file_path, project_name):
 
     with SessionLocal() as session:
         for _, row in df.iterrows():
-            house_name = str(row[col_map['Название дома']])
+            house_name = str(row[col_map['Название дома']]).strip()
 
             if house_name != project_name:
                 continue
 
-            apt_num = str(row[col_map['Номер квартиры']])
+            apt_num = _clean_str(row[col_map['Номер квартиры']])
             clean_contract = "".join(str(row[col_map['Номер договора']]).split()).upper()
 
             raw_delivery_date = row[col_map['Дата сдачи']]
@@ -193,7 +205,7 @@ def analyze_excel_changes(file_path, project_name):
             new_data = {
                 "house_name": house_name,
                 "apt_num": apt_num,
-                "entrance": str(row[col_map['Подъезд']]),
+                "entrance": _clean_str(row[col_map['Подъезд']]),
                 "floor": int(row[col_map['Этаж']]),
                 "contract_num": clean_contract,
                 "client_fio": str(row[col_map['ФИО клиента']]),
