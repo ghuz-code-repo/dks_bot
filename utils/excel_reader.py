@@ -165,6 +165,39 @@ def process_excel_file(file_path, project_name=None, address_ru=None, address_uz
     return count, detected_project
 
 
+def export_project_contracts(project_name, file_path):
+    """
+    Выгружает текущие договоры проекта в Excel-файл.
+    
+    Args:
+        project_name: название проекта
+        file_path: путь для сохранения файла
+    
+    Returns:
+        int: количество выгруженных договоров
+    """
+    with SessionLocal() as session:
+        contracts = session.query(Contract).filter_by(house_name=project_name).order_by(
+            Contract.apt_num
+        ).all()
+
+        rows = []
+        for c in contracts:
+            rows.append({
+                'Название дома': c.house_name,
+                'Номер квартиры': c.apt_num,
+                'Подъезд': c.entrance,
+                'Этаж': c.floor,
+                'Номер договора': c.contract_num,
+                'ФИО клиента': c.client_fio,
+                'Дата сдачи': c.delivery_date.strftime('%d.%m.%Y') if c.delivery_date else '',
+            })
+
+    df = pd.DataFrame(rows, columns=EXPECTED_COLUMNS)
+    df.to_excel(file_path, index=False)
+    return len(rows)
+
+
 def analyze_excel_changes(file_path, project_name):
     """
     Анализ Excel-файла и сравнение с текущими данными в БД.

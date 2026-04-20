@@ -16,7 +16,7 @@ from config import ADMIN_ID
 from database.models import Booking, Contract
 from database.models import Setting
 from database.session import SessionLocal
-from utils.excel_reader import process_excel_file, analyze_excel_changes, apply_contract_changes
+from utils.excel_reader import process_excel_file, analyze_excel_changes, apply_contract_changes, export_project_contracts
 from utils.holidays import generate_holidays_excel, import_holidays_from_excel, get_all_holidays
 from utils.states import AdminSteps
 from keyboards.reply import (
@@ -1087,18 +1087,38 @@ async def update_contracts_project_selected(callback: types.CallbackQuery, state
 
     await callback.message.edit_text(
         f"🏘 Проект: **{project_name}**\n\n"
-        f"Отправьте Excel-файл с актуальными договорами.\n\n"
-        f"Файл должен содержать столбцы:\n"
-        f"• Название дома\n"
-        f"• Номер квартиры\n"
-        f"• Подъезд\n"
-        f"• Этаж\n"
-        f"• Номер договора\n"
-        f"• ФИО клиента\n"
-        f"• Дата сдачи",
+        f"⏳ Формирую файл с текущими договорами...",
         parse_mode="Markdown"
     )
     await callback.answer()
+
+    # Отправляем текущие договоры проекта как шаблон для обновления
+    export_path = f"data/contracts_{project_name}.xlsx"
+    try:
+        count = export_project_contracts(project_name, export_path)
+        if count > 0:
+            caption = (
+                f"📋 **Текущие договоры проекта {project_name}** ({count} шт.)\n\n"
+                f"📥 Отправьте обновлённый файл с актуальными договорами для анализа изменений."
+            )
+        else:
+            caption = (
+                f"📋 **Проект {project_name}**\n\n"
+                f"Договоров пока нет.\n\n"
+                f"📥 Отправьте Excel-файл с договорами для загрузки."
+            )
+        doc = FSInputFile(export_path, filename=f"Договоры_{project_name}.xlsx")
+        await callback.message.answer_document(
+            document=doc,
+            caption=caption,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logging.error(f"Ошибка при выгрузке договоров: {e}")
+        await callback.message.answer(
+            f"⚠️ Не удалось сформировать файл с текущими договорами.\n\n"
+            f"📥 Отправьте Excel-файл с актуальными договорами для анализа."
+        )
 
 
 @router.message(AdminSteps.update_contracts_waiting_excel, F.document)
