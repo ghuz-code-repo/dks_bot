@@ -2109,7 +2109,7 @@ async def date_selected(callback: types.CallbackQuery, state: FSMContext):
     
     # Форматируем даты
     sel_date_fmt = selected_date.strftime('%d.%m.%Y')
-    del_date_fmt = contract.delivery_date.strftime('%d.%m.%Y')
+    del_date_fmt = contract.delivery_date.strftime('%d.%m.%Y') if contract.delivery_date else '-'
 
     # Формируем текст на нужном языке
     message_text = get_message('date_selected_choose_time', lang,
