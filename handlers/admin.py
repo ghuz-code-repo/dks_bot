@@ -2716,7 +2716,9 @@ async def start_contract_lookup(message: types.Message, state: FSMContext):
     await state.set_state(AdminSteps.waiting_for_contract_lookup)
     await message.answer(
         "🔍 Отправьте номер договора (например, <code>12345-GHP</code>), "
-        "по которому нужна информация:",
+        "по которому нужна информация.\n\n"
+        "💡 Если ввести только цифры, к ним автоматически добавится "
+        "<code>-GHP</code>. Регистр букв не важен.",
         parse_mode="HTML",
         reply_markup=get_admin_keyboard(with_back=True)
     )
@@ -2728,44 +2730,82 @@ async def cancel_contract_lookup(message: types.Message, state: FSMContext):
     await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
 
 
+def _normalize_contract_num(raw: str) -> str:
+    """Привести введённый номер договора к каноническому виду.
+
+    Правила:
+    - убираются пробелы;
+    - подстрока ``ghp`` в любом регистре заменяется на ``GHP``
+      (остальные символы регистр сохраняют);
+    - если строка состоит только из цифр — добавляется суффикс ``-GHP``.
+    """
+    import re
+
+    cleaned = (raw or "").replace(" ", "")
+    cleaned = re.sub(r"ghp", "GHP", cleaned, flags=re.IGNORECASE)
+    if cleaned.isdigit():
+        cleaned = f"{cleaned}-GHP"
+    return cleaned
+
+
 @router.message(AdminSteps.waiting_for_contract_lookup, ~F.text.in_(ADMIN_MENU_BUTTONS))
 async def process_contract_lookup(message: types.Message, state: FSMContext):
     """Поиск договора по номеру и отправка подробной информации."""
     raw = (message.text or "").strip()
     if not raw:
         await message.answer(
-            "❌ Пустой номер договора. Введите номер ещё раз:",
+            "❌ Пустой номер договора. Введите номер другого договора "
+            "или нажмите «⬅️ Назад», чтобы выйти из поиска.",
             reply_markup=get_admin_keyboard(with_back=True)
         )
         return
 
-    contract_num = raw.replace(" ", "")
+    contract_num = _normalize_contract_num(raw)
 
-    with SessionLocal() as session:
-        contract = (
-            session.query(Contract)
-            .filter(func.upper(Contract.contract_num) == contract_num.upper())
-            .first()
-        )
-        if not contract:
-            await message.answer(
-                f"❌ Договор <code>{_h(contract_num)}</code> не найден. Введите другой номер:",
-                parse_mode="HTML",
-                reply_markup=get_admin_keyboard(with_back=True)
+    try:
+        with SessionLocal() as session:
+            contract = (
+                session.query(Contract)
+                .filter(func.upper(Contract.contract_num) == contract_num.upper())
+                .first()
             )
-            return
+            if not contract:
+                await message.answer(
+                    f"❌ Договор <code>{_h(contract_num)}</code> не найден.\n"
+                    "Введите номер другого договора или нажмите «⬅️ Назад», "
+                    "чтобы выйти из поиска.",
+                    parse_mode="HTML",
+                    reply_markup=get_admin_keyboard(with_back=True)
+                )
+                return
 
-        bookings = (
-            session.query(Booking)
-            .filter(Booking.contract_id == contract.id)
-            .all()
+            bookings = (
+                session.query(Booking)
+                .filter(Booking.contract_id == contract.id)
+                .all()
+            )
+            text = _format_contract_info(contract, bookings)
+    except Exception as e:
+        logging.exception("Ошибка при поиске договора %s", contract_num)
+        await message.answer(
+            f"❌ Произошла ошибка при поиске договора: {_h(str(e))}\n"
+            "Введите номер другого договора или нажмите «⬅️ Назад», "
+            "чтобы выйти из поиска.",
+            parse_mode="HTML",
+            reply_markup=get_admin_keyboard(with_back=True)
         )
-        text = _format_contract_info(contract, bookings)
+        return
 
-    await state.clear()
+    # Состояние не сбрасываем — админ может ввести ещё один номер договора
+    # или выйти кнопкой «⬅️ Назад».
     await message.answer(
         text,
         parse_mode="HTML",
-        reply_markup=get_admin_keyboard(),
+        reply_markup=get_admin_keyboard(with_back=True),
         disable_web_page_preview=True,
+    )
+    await message.answer(
+        "Введите номер другого договора или нажмите «⬅️ Назад», "
+        "чтобы выйти из поиска.",
+        reply_markup=get_admin_keyboard(with_back=True),
     )
