@@ -9,7 +9,7 @@ from aiogram import Router, F, types
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile
-from sqlalchemy import select
+from sqlalchemy import select, func
 from database.models import Staff, ProjectSlots
 from aiogram.filters import BaseFilter
 from config import ADMIN_ID
@@ -19,6 +19,7 @@ from database.session import SessionLocal
 from utils.excel_reader import process_excel_file, analyze_excel_changes, apply_contract_changes, export_project_contracts
 from utils.holidays import generate_holidays_excel, import_holidays_from_excel, get_all_holidays
 from utils.states import AdminSteps
+from utils.language import format_tg_contact_md
 from keyboards.reply import (
     get_admin_keyboard, get_staff_management_keyboard, 
     get_slots_management_keyboard, get_cancel_keyboard
@@ -53,7 +54,8 @@ ADMIN_MENU_BUTTONS = [
     "📊 Текущие настройки проектов", "🔙 Назад",
     "➕ Добавить администратора", "➕ Добавить сотрудника",
     "📋 Список персонала", "❌ Удалить из персонала",
-    "🎉 Праздничные дни"
+    "🎉 Праздничные дни",
+    "🔍 Информация по договору"
 ]
 
 
@@ -95,6 +97,8 @@ async def reset_state_on_menu_button(message: types.Message, state: FSMContext):
         await export_report(message)
     elif text == "📋 Список записей":
         await show_bookings_list(message, state)
+    elif text == "🔍 Информация по договору":
+        await start_contract_lookup(message, state)
     elif text == "➕ Добавить администратора":
         await start_add_admin(message, state)
     elif text == "➕ Добавить сотрудника":
@@ -278,6 +282,11 @@ async def _handle_back_navigation(message: types.Message, state: FSMContext):
             "👥 Управление персоналом\n\nВыберите действие:",
             reply_markup=get_staff_management_keyboard()
         )
+
+    # === Поиск договора ===
+    elif current_state == AdminSteps.waiting_for_contract_lookup:
+        await state.clear()
+        await message.answer("Главное меню:", reply_markup=get_admin_keyboard())
 
     # === Список записей ===
     elif current_state == AdminSteps.selecting_project_for_bookings:
@@ -2588,4 +2597,149 @@ async def holidays_wrong_type(message: types.Message, state: FSMContext):
     """Обработка неверного типа сообщения при ожидании Excel."""
     await message.answer(
         "⚠️ Пожалуйста, отправьте Excel-файл (.xlsx или .xls) с праздничными днями."
+    )
+
+
+# ====================================================================
+# Поиск информации по договору
+# ====================================================================
+
+def _escape_md(text: str | None) -> str:
+    """Экранирование служебных символов Markdown (legacy mode)."""
+    if text is None:
+        return ""
+    return str(text).replace("\\", "\\\\").replace("*", "\\*").replace("_", "\\_").replace("`", "\\`").replace("[", "\\[")
+
+
+def _format_contract_info(contract: Contract, bookings: list[Booking]) -> str:
+    """Сформировать текст с подробной информацией о договоре, его записях и владельце."""
+    lines = [
+        "📄 *Информация по договору*",
+        "",
+        f"📄 Договор: `{_escape_md(contract.contract_num)}`",
+        f"👤 ФИО: {_escape_md(contract.client_fio) or '—'}",
+        f"🏠 Объект: {_escape_md(contract.house_name) or '—'}",
+        f"🏢 Кв. {_escape_md(contract.apt_num) or '—'}, "
+        f"подъезд {_escape_md(contract.entrance) or '—'}, "
+        f"этаж {contract.floor if contract.floor is not None else '—'}",
+    ]
+    if contract.delivery_date:
+        lines.append(f"📅 Дата сдачи: {contract.delivery_date.strftime('%d.%m.%Y')}")
+    else:
+        lines.append("📅 Дата сдачи: —")
+
+    # Telegram-аккаунт владельца договора
+    lines.append("")
+    lines.append("👥 *Привязанный Telegram-аккаунт:*")
+    if contract.telegram_id:
+        lines.append(f"• ID: `{contract.telegram_id}`")
+        lines.append(f"• Контакт: {format_tg_contact_md(contract.telegram_id, contract.username)}")
+        if contract.href:
+            lines.append(f"• Ссылка: {contract.href}")
+    else:
+        lines.append("• Договор не привязан ни к одному Telegram-аккаунту.")
+
+    # Записи
+    lines.append("")
+    if not bookings:
+        lines.append("📋 *Записи:* отсутствуют.")
+        return "\n".join(lines)
+
+    active = [b for b in bookings if not b.is_cancelled]
+    cancelled = [b for b in bookings if b.is_cancelled]
+    lines.append(f"📋 *Записи* (всего {len(bookings)}, активных {len(active)}, отменённых {len(cancelled)}):")
+
+    # Сортировка: сначала активные по дате/времени, потом отменённые от свежих к старым
+    active.sort(key=lambda b: (b.date, b.time_slot))
+    cancelled.sort(key=lambda b: (b.date, b.time_slot), reverse=True)
+
+    def _booking_line(b: Booking) -> str:
+        status = "❌ отменена" if b.is_cancelled else "✅ активна"
+        date_str = b.date.strftime('%d.%m.%Y') if b.date else "—"
+        time_str = b.time_slot.strftime('%H:%M') if b.time_slot else "—"
+        creator = (
+            f"создал tg_id={b.user_telegram_id}"
+            if b.user_telegram_id else "создал: неизвестно"
+        )
+        phone = _escape_md(b.client_phone) if b.client_phone else "—"
+        return f"  • {date_str} {time_str} | {status} | тел: {phone} | {creator}"
+
+    if active:
+        lines.append("")
+        lines.append("*Активные:*")
+        for b in active:
+            lines.append(_booking_line(b))
+
+    if cancelled:
+        lines.append("")
+        lines.append("*Отменённые:*")
+        # Ограничим вывод, чтобы не упереться в лимит сообщения
+        max_cancelled = 20
+        for b in cancelled[:max_cancelled]:
+            lines.append(_booking_line(b))
+        if len(cancelled) > max_cancelled:
+            lines.append(f"  …и ещё {len(cancelled) - max_cancelled} отменённых записей.")
+
+    return "\n".join(lines)
+
+
+@router.message(F.text == "🔍 Информация по договору")
+async def start_contract_lookup(message: types.Message, state: FSMContext):
+    """Запрос номера договора у админа."""
+    await state.set_state(AdminSteps.waiting_for_contract_lookup)
+    await message.answer(
+        "🔍 Отправьте номер договора (например, `12345-GHP`), "
+        "по которому нужна информация:",
+        parse_mode="Markdown",
+        reply_markup=get_admin_keyboard(with_back=True)
+    )
+
+
+@router.message(AdminSteps.waiting_for_contract_lookup, F.text == "❌ Отменить")
+async def cancel_contract_lookup(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Операция отменена.", reply_markup=get_admin_keyboard())
+
+
+@router.message(AdminSteps.waiting_for_contract_lookup, ~F.text.in_(ADMIN_MENU_BUTTONS))
+async def process_contract_lookup(message: types.Message, state: FSMContext):
+    """Поиск договора по номеру и отправка подробной информации."""
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer(
+            "❌ Пустой номер договора. Введите номер ещё раз:",
+            reply_markup=get_admin_keyboard(with_back=True)
+        )
+        return
+
+    # Сохраняем регистр, как хранится в БД, но допускаем разный регистр и пробелы
+    contract_num = raw.replace(" ", "")
+
+    with SessionLocal() as session:
+        contract = (
+            session.query(Contract)
+            .filter(func.upper(Contract.contract_num) == contract_num.upper())
+            .first()
+        )
+        if not contract:
+            await message.answer(
+                f"❌ Договор `{_escape_md(contract_num)}` не найден. Введите другой номер:",
+                parse_mode="Markdown",
+                reply_markup=get_admin_keyboard(with_back=True)
+            )
+            return
+
+        bookings = (
+            session.query(Booking)
+            .filter(Booking.contract_id == contract.id)
+            .all()
+        )
+        text = _format_contract_info(contract, bookings)
+
+    await state.clear()
+    await message.answer(
+        text,
+        parse_mode="Markdown",
+        reply_markup=get_admin_keyboard(),
+        disable_web_page_preview=True,
     )

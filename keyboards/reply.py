@@ -31,7 +31,8 @@ def get_admin_keyboard(with_back: bool = False) -> ReplyKeyboardMarkup:
     keyboard += [
         [KeyboardButton(text="👥 Управление персоналом"), KeyboardButton(text="⚙️ Настройки проектов")],
         [KeyboardButton(text="📊 Выгрузить отчет"), KeyboardButton(text="📋 Список записей")],
-        [KeyboardButton(text="➕ Добавление проектов"), KeyboardButton(text="🏠 Список проектов")]
+        [KeyboardButton(text="➕ Добавление проектов"), KeyboardButton(text="🏠 Список проектов")],
+        [KeyboardButton(text="🔍 Информация по договору")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
