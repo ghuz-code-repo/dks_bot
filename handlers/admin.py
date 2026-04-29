@@ -2645,16 +2645,32 @@ def _format_contract_info(contract: Contract, bookings: list[Booking]) -> str:
         lines.append("📋 *Записи:* отсутствуют.")
         return "\n".join(lines)
 
-    active = [b for b in bookings if not b.is_cancelled]
-    cancelled = [b for b in bookings if b.is_cancelled]
-    lines.append(f"📋 *Записи* (всего {len(bookings)}, активных {len(active)}, отменённых {len(cancelled)}):")
+    from datetime import date as _date
 
-    # Сортировка: сначала активные по дате/времени, потом отменённые от свежих к старым
-    active.sort(key=lambda b: (b.date, b.time_slot))
+    today = _date.today()
+    # Категории: предстоящие активные, прошедшие активные (= "состоявшиеся"), отменённые
+    upcoming = [b for b in bookings if not b.is_cancelled and b.date and b.date >= today]
+    past = [b for b in bookings if not b.is_cancelled and b.date and b.date < today]
+    cancelled = [b for b in bookings if b.is_cancelled]
+
+    lines.append(
+        f"📋 *Записи* (всего {len(bookings)}, "
+        f"предстоящих {len(upcoming)}, "
+        f"прошедших {len(past)}, "
+        f"отменённых {len(cancelled)}):"
+    )
+
+    upcoming.sort(key=lambda b: (b.date, b.time_slot))
+    past.sort(key=lambda b: (b.date, b.time_slot), reverse=True)
     cancelled.sort(key=lambda b: (b.date, b.time_slot), reverse=True)
 
     def _booking_line(b: Booking) -> str:
-        status = "❌ отменена" if b.is_cancelled else "✅ активна"
+        if b.is_cancelled:
+            status = "❌ отменена"
+        elif b.date and b.date < today:
+            status = "🕒 прошедшая"
+        else:
+            status = "✅ активна"
         date_str = b.date.strftime('%d.%m.%Y') if b.date else "—"
         time_str = b.time_slot.strftime('%H:%M') if b.time_slot else "—"
         creator = (
@@ -2664,16 +2680,27 @@ def _format_contract_info(contract: Contract, bookings: list[Booking]) -> str:
         phone = _escape_md(b.client_phone) if b.client_phone else "—"
         return f"  • {date_str} {time_str} | {status} | тел: {phone} | {creator}"
 
-    if active:
+    if upcoming:
         lines.append("")
-        lines.append("*Активные:*")
-        for b in active:
+        lines.append("*Предстоящие:*")
+        max_upcoming = 20
+        for b in upcoming[:max_upcoming]:
             lines.append(_booking_line(b))
+        if len(upcoming) > max_upcoming:
+            lines.append(f"  …и ещё {len(upcoming) - max_upcoming} предстоящих записей.")
+
+    if past:
+        lines.append("")
+        lines.append("*Прошедшие:*")
+        max_past = 10
+        for b in past[:max_past]:
+            lines.append(_booking_line(b))
+        if len(past) > max_past:
+            lines.append(f"  …и ещё {len(past) - max_past} прошедших записей.")
 
     if cancelled:
         lines.append("")
         lines.append("*Отменённые:*")
-        # Ограничим вывод, чтобы не упереться в лимит сообщения
         max_cancelled = 20
         for b in cancelled[:max_cancelled]:
             lines.append(_booking_line(b))
