@@ -19,7 +19,7 @@ from database.session import SessionLocal
 from utils.excel_reader import process_excel_file, analyze_excel_changes, apply_contract_changes, export_project_contracts
 from utils.holidays import generate_holidays_excel, import_holidays_from_excel, get_all_holidays
 from utils.states import AdminSteps
-from utils.language import format_tg_contact_md
+from utils.language import format_tg_contact_md, format_tg_contact_html
 from keyboards.reply import (
     get_admin_keyboard, get_staff_management_keyboard, 
     get_slots_management_keyboard, get_cancel_keyboard
@@ -2604,23 +2604,24 @@ async def holidays_wrong_type(message: types.Message, state: FSMContext):
 # Поиск информации по договору
 # ====================================================================
 
-def _escape_md(text: str | None) -> str:
-    """Экранирование служебных символов Markdown (legacy mode)."""
+def _h(text) -> str:
+    """Экранирование для HTML parse_mode."""
+    from html import escape as _html_escape
     if text is None:
         return ""
-    return str(text).replace("\\", "\\\\").replace("*", "\\*").replace("_", "\\_").replace("`", "\\`").replace("[", "\\[")
+    return _html_escape(str(text))
 
 
 def _format_contract_info(contract: Contract, bookings: list[Booking]) -> str:
-    """Сформировать текст с подробной информацией о договоре, его записях и владельце."""
+    """Сформировать HTML-текст с подробной информацией о договоре, его записях и владельце."""
     lines = [
-        "📄 *Информация по договору*",
+        "📄 <b>Информация по договору</b>",
         "",
-        f"📄 Договор: `{_escape_md(contract.contract_num)}`",
-        f"👤 ФИО: {_escape_md(contract.client_fio) or '—'}",
-        f"🏠 Объект: {_escape_md(contract.house_name) or '—'}",
-        f"🏢 Кв. {_escape_md(contract.apt_num) or '—'}, "
-        f"подъезд {_escape_md(contract.entrance) or '—'}, "
+        f"📄 Договор: <code>{_h(contract.contract_num)}</code>",
+        f"👤 ФИО: {_h(contract.client_fio) or '—'}",
+        f"🏠 Объект: {_h(contract.house_name) or '—'}",
+        f"🏢 Кв. {_h(contract.apt_num) or '—'}, "
+        f"подъезд {_h(contract.entrance) or '—'}, "
         f"этаж {contract.floor if contract.floor is not None else '—'}",
     ]
     if contract.delivery_date:
@@ -2630,31 +2631,30 @@ def _format_contract_info(contract: Contract, bookings: list[Booking]) -> str:
 
     # Telegram-аккаунт владельца договора
     lines.append("")
-    lines.append("👥 *Привязанный Telegram-аккаунт:*")
+    lines.append("👥 <b>Привязанный Telegram-аккаунт:</b>")
     if contract.telegram_id:
-        lines.append(f"• ID: `{contract.telegram_id}`")
-        lines.append(f"• Контакт: {format_tg_contact_md(contract.telegram_id, contract.username)}")
+        lines.append(f"• ID: <code>{contract.telegram_id}</code>")
+        lines.append(f"• Контакт: {format_tg_contact_html(contract.telegram_id, contract.username)}")
         if contract.href:
-            lines.append(f"• Ссылка: {contract.href}")
+            lines.append(f"• Ссылка: {_h(contract.href)}")
     else:
         lines.append("• Договор не привязан ни к одному Telegram-аккаунту.")
 
     # Записи
     lines.append("")
     if not bookings:
-        lines.append("📋 *Записи:* отсутствуют.")
+        lines.append("📋 <b>Записи:</b> отсутствуют.")
         return "\n".join(lines)
 
     from datetime import date as _date
 
     today = _date.today()
-    # Категории: предстоящие активные, прошедшие активные (= "состоявшиеся"), отменённые
     upcoming = [b for b in bookings if not b.is_cancelled and b.date and b.date >= today]
     past = [b for b in bookings if not b.is_cancelled and b.date and b.date < today]
     cancelled = [b for b in bookings if b.is_cancelled]
 
     lines.append(
-        f"📋 *Записи* (всего {len(bookings)}, "
+        f"📋 <b>Записи</b> (всего {len(bookings)}, "
         f"предстоящих {len(upcoming)}, "
         f"прошедших {len(past)}, "
         f"отменённых {len(cancelled)}):"
@@ -2677,12 +2677,12 @@ def _format_contract_info(contract: Contract, bookings: list[Booking]) -> str:
             f"создал tg_id={b.user_telegram_id}"
             if b.user_telegram_id else "создал: неизвестно"
         )
-        phone = _escape_md(b.client_phone) if b.client_phone else "—"
+        phone = _h(b.client_phone) if b.client_phone else "—"
         return f"  • {date_str} {time_str} | {status} | тел: {phone} | {creator}"
 
     if upcoming:
         lines.append("")
-        lines.append("*Предстоящие:*")
+        lines.append("<b>Предстоящие:</b>")
         max_upcoming = 20
         for b in upcoming[:max_upcoming]:
             lines.append(_booking_line(b))
@@ -2691,7 +2691,7 @@ def _format_contract_info(contract: Contract, bookings: list[Booking]) -> str:
 
     if past:
         lines.append("")
-        lines.append("*Прошедшие:*")
+        lines.append("<b>Прошедшие:</b>")
         max_past = 10
         for b in past[:max_past]:
             lines.append(_booking_line(b))
@@ -2700,7 +2700,7 @@ def _format_contract_info(contract: Contract, bookings: list[Booking]) -> str:
 
     if cancelled:
         lines.append("")
-        lines.append("*Отменённые:*")
+        lines.append("<b>Отменённые:</b>")
         max_cancelled = 20
         for b in cancelled[:max_cancelled]:
             lines.append(_booking_line(b))
@@ -2715,9 +2715,9 @@ async def start_contract_lookup(message: types.Message, state: FSMContext):
     """Запрос номера договора у админа."""
     await state.set_state(AdminSteps.waiting_for_contract_lookup)
     await message.answer(
-        "🔍 Отправьте номер договора (например, `12345-GHP`), "
+        "🔍 Отправьте номер договора (например, <code>12345-GHP</code>), "
         "по которому нужна информация:",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=get_admin_keyboard(with_back=True)
     )
 
@@ -2739,7 +2739,6 @@ async def process_contract_lookup(message: types.Message, state: FSMContext):
         )
         return
 
-    # Сохраняем регистр, как хранится в БД, но допускаем разный регистр и пробелы
     contract_num = raw.replace(" ", "")
 
     with SessionLocal() as session:
@@ -2750,8 +2749,8 @@ async def process_contract_lookup(message: types.Message, state: FSMContext):
         )
         if not contract:
             await message.answer(
-                f"❌ Договор `{_escape_md(contract_num)}` не найден. Введите другой номер:",
-                parse_mode="Markdown",
+                f"❌ Договор <code>{_h(contract_num)}</code> не найден. Введите другой номер:",
+                parse_mode="HTML",
                 reply_markup=get_admin_keyboard(with_back=True)
             )
             return
@@ -2766,7 +2765,7 @@ async def process_contract_lookup(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
         text,
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=get_admin_keyboard(),
         disable_web_page_preview=True,
     )

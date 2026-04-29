@@ -106,6 +106,17 @@ def format_tg_contact_md(telegram_id: int | None, username: str | None) -> str:
     return "—"
 
 
+def format_tg_contact_html(telegram_id: int | None, username: str | None) -> str:
+    """Сформировать строку контакта Telegram для HTML-сообщений админам."""
+    from html import escape as _html_escape
+    if username:
+        safe = _html_escape(username)
+        return f'<a href="https://t.me/{safe}">@{safe}</a>'
+    if telegram_id:
+        return f'<a href="tg://user?id={telegram_id}">профиль</a>'
+    return "—"
+
+
 # Все тексты сообщений
 MESSAGES = {
     # Приветственные сообщения
