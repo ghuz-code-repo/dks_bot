@@ -16,7 +16,7 @@ from keyboards.inline import generate_time_slots, generate_calendar, get_min_boo
 from utils.holidays import get_holiday_dates
 from keyboards.reply import get_phone_request_keyboard, get_client_keyboard, BUTTON_TEXTS
 from utils.states import ClientSteps
-from utils.language import get_user_language, toggle_language, get_message, get_user_phone, set_user_phone
+from utils.language import get_user_language, toggle_language, get_message, get_user_phone, set_user_phone, build_tg_href, format_tg_contact_md
 
 router = Router()
 
@@ -915,6 +915,11 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
         contract = session.query(Contract).filter(Contract.id == contract_id).first()
         if contract and not contract.telegram_id:
             contract.telegram_id = user_id
+            contract.username = source.from_user.username
+            contract.href = build_tg_href(user_id, source.from_user.username)
+        elif contract and contract.telegram_id == user_id:
+            contract.username = source.from_user.username
+            contract.href = build_tg_href(user_id, source.from_user.username)
 
         # Отменяем все активные записи пользователя на этот ЖК перед созданием новой
         today = date.today()
@@ -988,6 +993,7 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
             f"🔔 **Новая запись на прием!**\n\n"
             f"👤 Клиент: {client_fio}\n"
             f"📞 Тел: {user_phone}\n"
+            f"💬 TG: {format_tg_contact_md(contract.telegram_id, contract.username)}\n"
             f"🏠 Объект: {house_name}\n"
             f"🏢 Кв. {apt_num}, подъезд {contract.entrance}, этаж {contract.floor}\n"
             f"📄 Договор: {contract.contract_num}\n"
@@ -2223,6 +2229,7 @@ async def process_phone_booking_callback(callback: types.CallbackQuery, state: F
     """Обработка бронирования при использовании сохранённого номера (через callback)"""
     user_data = await state.get_data()
     user_id = callback.from_user.id
+    username = callback.from_user.username
     lang = get_user_language(user_id)
 
     # Извлекаем данные для подстановки в текст
@@ -2235,6 +2242,11 @@ async def process_phone_booking_callback(callback: types.CallbackQuery, state: F
         contract = session.query(Contract).filter(Contract.id == user_data['contract_id']).first()
         if contract and not contract.telegram_id:
             contract.telegram_id = user_id
+            contract.username = username
+            contract.href = build_tg_href(user_id, username)
+        elif contract and contract.telegram_id == user_id:
+            contract.username = username
+            contract.href = build_tg_href(user_id, username)
         
         # Отложенная отмена старой записи (если есть) — атомарно с созданием новой
         pending_cancel_id = user_data.get('pending_cancel_booking_id')
@@ -2263,6 +2275,7 @@ async def process_phone_booking_callback(callback: types.CallbackQuery, state: F
             f"🔔 **Новая запись на прием!**\n\n"
             f"👤 Клиент: {contract.client_fio}\n"
             f"📞 Тел: {user_phone}\n"
+            f"💬 TG: {format_tg_contact_md(contract.telegram_id, contract.username)}\n"
             f"🏠 Объект: {contract.house_name}\n"
             f"🏢 Кв. {contract.apt_num}, подъезд {contract.entrance}, этаж {contract.floor}\n"
             f"📄 Договор: {contract.contract_num}\n"
@@ -2381,6 +2394,7 @@ async def process_phone_booking(message: types.Message, state: FSMContext, bot: 
     """Общая логика обработки бронирования после получения номера телефона"""
     user_data = await state.get_data()
     user_id = message.from_user.id
+    username = message.from_user.username
     lang = get_user_language(user_id)
     
     # Сохраняем номер телефона для будущих записей
@@ -2396,6 +2410,11 @@ async def process_phone_booking(message: types.Message, state: FSMContext, bot: 
         contract = session.query(Contract).filter(Contract.id == user_data['contract_id']).first()
         if contract and not contract.telegram_id:
             contract.telegram_id = user_id
+            contract.username = username
+            contract.href = build_tg_href(user_id, username)
+        elif contract and contract.telegram_id == user_id:
+            contract.username = username
+            contract.href = build_tg_href(user_id, username)
         
         # Отложенная отмена старой записи (если есть) — атомарно с созданием новой
         pending_cancel_id = user_data.get('pending_cancel_booking_id')
@@ -2424,6 +2443,7 @@ async def process_phone_booking(message: types.Message, state: FSMContext, bot: 
             f"🔔 **Новая запись на прием!**\n\n"
             f"👤 Клиент: {contract.client_fio}\n"
             f"📞 Тел: {user_phone}\n"
+            f"💬 TG: {format_tg_contact_md(contract.telegram_id, contract.username)}\n"
             f"🏠 Объект: {contract.house_name}\n"
             f"🏢 Кв. {contract.apt_num}, подъезд {contract.entrance}, этаж {contract.floor}\n"
             f"📄 Договор: {contract.contract_num}\n"

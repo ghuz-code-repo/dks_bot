@@ -43,6 +43,20 @@ def _run_migrations():
         if user_lang_columns and 'phone' not in user_lang_columns:
             conn.execute(text("ALTER TABLE user_languages ADD COLUMN phone TEXT"))
             conn.commit()
+
+        # Миграция для таблицы contracts
+        result = conn.execute(text("PRAGMA table_info(contracts)"))
+        contracts_columns = {row[1] for row in result.fetchall()}
+
+        # Добавляем username если отсутствует
+        if contracts_columns and 'username' not in contracts_columns:
+            conn.execute(text("ALTER TABLE contracts ADD COLUMN username TEXT"))
+            conn.commit()
+
+        # Добавляем href если отсутствует
+        if contracts_columns and 'href' not in contracts_columns:
+            conn.execute(text("ALTER TABLE contracts ADD COLUMN href TEXT"))
+            conn.commit()
         
         # Миграция для таблицы project_slots (добавление адресов)
         result = conn.execute(text("PRAGMA table_info(project_slots)"))

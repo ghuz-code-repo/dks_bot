@@ -385,6 +385,8 @@ def apply_contract_changes(new_contracts=None, minor_updates=None, review_decisi
                 if "unbind_tg" in actions:
                     if contract.telegram_id:
                         contract.telegram_id = None
+                        contract.username = None
+                        contract.href = None
                         result["unbound_tg"] += 1
                     # Также очищаем user_telegram_id в записях этого договора,
                     # чтобы отменённые записи не блокировали нового пользователя

@@ -31,6 +31,8 @@ class Contract(Base):
     client_fio = Column(String)
     delivery_date = Column(Date)  # Новое поле: Дата сдачи
     telegram_id = Column(Integer, nullable=True)
+    username = Column(String, nullable=True)  # Telegram @username (без @), если есть
+    href = Column(String, nullable=True)  # Ссылка на профиль: https://t.me/<username> или tg://user?id=<id>
 
     bookings = relationship("Booking", back_populates="contract")
 

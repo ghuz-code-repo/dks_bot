@@ -76,6 +76,36 @@ def set_user_phone(telegram_id: int, phone: str) -> None:
         session.commit()
 
 
+def build_tg_href(telegram_id: int | None, username: str | None) -> str | None:
+    """Сформировать ссылку на профиль Telegram.
+
+    - Если есть @username -> https://t.me/<username> (открывается в любом браузере)
+    - Иначе, если есть telegram_id -> tg://user?id=<id> (только внутри Telegram)
+    - Иначе None.
+    """
+    if username:
+        return f"https://t.me/{username}"
+    if telegram_id:
+        return f"tg://user?id={telegram_id}"
+    return None
+
+
+def format_tg_contact_md(telegram_id: int | None, username: str | None) -> str:
+    """Сформировать строку контакта Telegram для Markdown-сообщений админам.
+
+    - Если есть @username -> "[@username](https://t.me/username)"
+    - Иначе, если есть telegram_id -> "[профиль](tg://user?id=<id>)"
+      (кликабельно только внутри Telegram-клиента)
+    - Иначе -> "—"
+    """
+    if username:
+        # Используем Markdown-ссылку, чтобы '_' в username не ломали разметку
+        return f"[@{username}](https://t.me/{username})"
+    if telegram_id:
+        return f"[профиль](tg://user?id={telegram_id})"
+    return "—"
+
+
 # Все тексты сообщений
 MESSAGES = {
     # Приветственные сообщения
@@ -98,8 +128,18 @@ MESSAGES = {
         'uz': '🏠 Turar-joy majmuasini tanlang:'
     },
     'enter_contract': {
-        'ru': '📝 Введите номер Вашего договора долевого участия по примеру 12345-GHP',
-        'uz': '📝 Ulushdorlik shartnomasi raqamingizni kiriting, masalan, 12345-GHP'
+        'ru': (
+            '📝 Введите номер Вашего договора долевого участия по примеру 12345-GHP\n\n'
+            '⚠️ Внимание: при записи договор будет привязан к этому Telegram-аккаунту. '
+            'Просматривать информацию по договору и управлять записями сможете ИСКЛЮЧИТЕЛЬНО с этого аккаунта. '
+            'Чтобы привязать договор к другому Telegram-аккаунту, обратитесь в поддержку.'
+        ),
+        'uz': (
+            '📝 Ulushdorlik shartnomasi raqamingizni kiriting, masalan, 12345-GHP\n\n'
+            '⚠️ Diqqat: yozuv yaratganda shartnoma ushbu Telegram akkauntiga bog\'lanadi. '
+            'Shartnoma bo\'yicha ma\'lumotni ko\'rish va yozuvlarni boshqarish FAQAT shu akkauntdan mumkin. '
+            'Shartnomani boshqa Telegram akkauntiga bog\'lash uchun qo\'llab-quvvatlash xizmatiga murojaat qiling.'
+        )
     },
     'contract_not_found': {
         'ru': '❌ Договор не найден. Проверьте номер и введите заново:',
