@@ -86,3 +86,33 @@ def _run_migrations():
             "description TEXT)"
         ))
         conn.commit()
+
+        # Создаём таблицу журнала изменений привязки договора, если её ещё нет
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS contract_binding_log ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "contract_id INTEGER NOT NULL, "
+            "contract_num TEXT, "
+            "action TEXT NOT NULL, "
+            "old_telegram_id INTEGER, "
+            "old_username TEXT, "
+            "new_telegram_id INTEGER, "
+            "new_username TEXT, "
+            "admin_telegram_id INTEGER NOT NULL, "
+            "admin_username TEXT, "
+            "created_at DATETIME NOT NULL, "
+            "note TEXT)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_contract_binding_log_contract_id "
+            "ON contract_binding_log(contract_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_contract_binding_log_contract_num "
+            "ON contract_binding_log(contract_num)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_contract_binding_log_admin_telegram_id "
+            "ON contract_binding_log(admin_telegram_id)"
+        ))
+        conn.commit()

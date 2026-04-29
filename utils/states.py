@@ -68,6 +68,9 @@ class AdminSteps(StatesGroup):
     # Поиск информации по договору
     waiting_for_contract_lookup = State()
 
+    # Изменение привязки договора
+    waiting_for_rebind_target = State()
+
 
 class EmployeeSteps(StatesGroup):
     """Состояния для работы панели сотрудника"""

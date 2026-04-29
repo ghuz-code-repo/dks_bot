@@ -13,13 +13,13 @@ from sqlalchemy import select, func
 from database.models import Staff, ProjectSlots
 from aiogram.filters import BaseFilter
 from config import ADMIN_ID
-from database.models import Booking, Contract
+from database.models import Booking, Contract, ContractBindingLog
 from database.models import Setting
 from database.session import SessionLocal
 from utils.excel_reader import process_excel_file, analyze_excel_changes, apply_contract_changes, export_project_contracts
 from utils.holidays import generate_holidays_excel, import_holidays_from_excel, get_all_holidays
 from utils.states import AdminSteps
-from utils.language import format_tg_contact_md, format_tg_contact_html
+from utils.language import format_tg_contact_md, format_tg_contact_html, build_tg_href
 from keyboards.reply import (
     get_admin_keyboard, get_staff_management_keyboard, 
     get_slots_management_keyboard, get_cancel_keyboard
@@ -287,6 +287,17 @@ async def _handle_back_navigation(message: types.Message, state: FSMContext):
     elif current_state == AdminSteps.waiting_for_contract_lookup:
         await state.clear()
         await message.answer("Главное меню:", reply_markup=get_admin_keyboard())
+
+    # === Изменение привязки договора — назад в режим поиска договора ===
+    elif current_state == AdminSteps.waiting_for_rebind_target:
+        await state.set_state(AdminSteps.waiting_for_contract_lookup)
+        await state.update_data(rebind_contract_id=None)
+        await message.answer(
+            "Изменение привязки отменено.\n"
+            "Введите номер другого договора или нажмите «⬅️ Назад», "
+            "чтобы выйти из поиска.",
+            reply_markup=get_admin_keyboard(with_back=True)
+        )
 
     # === Список записей ===
     elif current_state == AdminSteps.selecting_project_for_bookings:
@@ -2801,11 +2812,581 @@ async def process_contract_lookup(message: types.Message, state: FSMContext):
     await message.answer(
         text,
         parse_mode="HTML",
-        reply_markup=get_admin_keyboard(with_back=True),
+        reply_markup=_build_contract_actions_kb(contract),
         disable_web_page_preview=True,
     )
     await message.answer(
+        "Введите номер другого договора, выберите действие выше "
+        "или нажмите «⬅️ Назад», чтобы выйти из поиска.",
+        reply_markup=get_admin_keyboard(with_back=True),
+    )
+
+
+# ====================================================================
+# Изменение привязки договора к Telegram-аккаунту
+# ====================================================================
+
+def _build_contract_actions_kb(contract: Contract):
+    """Inline-клавиатура с действиями над договором (под карточкой)."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    if contract.telegram_id:
+        builder.button(
+            text="🔓 Отвязать аккаунт",
+            callback_data=f"cbind:unbind:{contract.id}"
+        )
+        builder.button(
+            text="🔁 Сменить аккаунт",
+            callback_data=f"cbind:rebind:{contract.id}"
+        )
+    else:
+        builder.button(
+            text="🔗 Привязать аккаунт",
+            callback_data=f"cbind:rebind:{contract.id}"
+        )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def _confirm_kb(action: str, contract_id: int):
+    """Inline-клавиатура подтверждения для деструктивной операции."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✅ Подтвердить",
+        callback_data=f"cbind:{action}_yes:{contract_id}"
+    )
+    builder.button(
+        text="❌ Отмена",
+        callback_data=f"cbind:cancel:{contract_id}"
+    )
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def _log_binding_change(
+    session,
+    *,
+    contract: Contract,
+    action: str,
+    old_telegram_id,
+    old_username,
+    new_telegram_id,
+    new_username,
+    admin_telegram_id: int,
+    admin_username,
+    note: str | None = None,
+):
+    """Записать запись в журнал изменений привязки договора."""
+    entry = ContractBindingLog(
+        contract_id=contract.id,
+        contract_num=contract.contract_num,
+        action=action,
+        old_telegram_id=old_telegram_id,
+        old_username=old_username,
+        new_telegram_id=new_telegram_id,
+        new_username=new_username,
+        admin_telegram_id=admin_telegram_id,
+        admin_username=admin_username,
+        created_at=datetime.utcnow(),
+        note=note,
+    )
+    session.add(entry)
+    logging.info(
+        "[contract_rebind] action=%s contract=%s admin=%s old=(%s,%s) new=(%s,%s) note=%s",
+        action,
+        contract.contract_num,
+        admin_telegram_id,
+        old_telegram_id,
+        old_username,
+        new_telegram_id,
+        new_username,
+        note,
+    )
+
+
+def _format_user_brief(telegram_id, username) -> str:
+    """Краткое HTML-представление пользователя."""
+    if not telegram_id and not username:
+        return "—"
+    parts = []
+    if telegram_id:
+        parts.append(f"<code>{telegram_id}</code>")
+    parts.append(format_tg_contact_html(telegram_id, username))
+    return " · ".join(parts)
+
+
+# --- Inline callbacks ---------------------------------------------------------
+
+@router.callback_query(F.data.startswith("cbind:unbind:"), IsAdminFilter())
+async def cb_unbind_request(callback: types.CallbackQuery, state: FSMContext):
+    """Подтверждение отвязки договора."""
+    try:
+        contract_id = int(callback.data.split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    with SessionLocal() as session:
+        contract = session.query(Contract).filter(Contract.id == contract_id).first()
+        if not contract:
+            await callback.answer("Договор не найден.", show_alert=True)
+            return
+        if not contract.telegram_id:
+            await callback.answer("Договор и так не привязан.", show_alert=True)
+            return
+
+        text = (
+            f"⚠️ Подтвердите <b>отвязку</b> договора "
+            f"<code>{_h(contract.contract_num)}</code>.\n\n"
+            f"Текущий аккаунт: {_format_user_brief(contract.telegram_id, contract.username)}\n\n"
+            "После отвязки этот аккаунт перестанет видеть договор и записи по нему. "
+            "Существующие записи в БД сохранятся вместе с информацией о том, кто их создал."
+        )
+
+    await callback.message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=_confirm_kb("unbind", contract_id),
+        disable_web_page_preview=True,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cbind:unbind_yes:"), IsAdminFilter())
+async def cb_unbind_apply(callback: types.CallbackQuery, state: FSMContext):
+    """Выполнить отвязку договора."""
+    try:
+        contract_id = int(callback.data.split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    admin_id = callback.from_user.id
+    admin_username = callback.from_user.username
+
+    try:
+        with SessionLocal() as session:
+            contract = session.query(Contract).filter(Contract.id == contract_id).first()
+            if not contract:
+                await callback.answer("Договор не найден.", show_alert=True)
+                return
+            if not contract.telegram_id:
+                await callback.answer("Договор уже отвязан.", show_alert=True)
+                return
+
+            old_id = contract.telegram_id
+            old_username = contract.username
+            contract.telegram_id = None
+            contract.username = None
+            contract.href = None
+
+            _log_binding_change(
+                session,
+                contract=contract,
+                action="unbind",
+                old_telegram_id=old_id,
+                old_username=old_username,
+                new_telegram_id=None,
+                new_username=None,
+                admin_telegram_id=admin_id,
+                admin_username=admin_username,
+            )
+            session.commit()
+
+            bookings = (
+                session.query(Booking)
+                .filter(Booking.contract_id == contract.id)
+                .all()
+            )
+            text = _format_contract_info(contract, bookings)
+            kb = _build_contract_actions_kb(contract)
+    except Exception as e:
+        logging.exception("Ошибка при отвязке договора %s", contract_id)
+        await callback.message.answer(
+            f"❌ Не удалось отвязать договор: {_h(str(e))}",
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await callback.message.answer(
+        "✅ Договор отвязан. Актуальная карточка ниже:",
+    )
+    await callback.message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=kb,
+        disable_web_page_preview=True,
+    )
+    await callback.answer("Готово")
+
+
+@router.callback_query(F.data.startswith("cbind:cancel:"), IsAdminFilter())
+async def cb_cancel(callback: types.CallbackQuery, state: FSMContext):
+    """Отмена операции (общая для unbind/rebind)."""
+    current_state = await state.get_state()
+    if current_state == AdminSteps.waiting_for_rebind_target:
+        await state.set_state(AdminSteps.waiting_for_contract_lookup)
+        await state.update_data(rebind_contract_id=None)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer("Операция отменена.")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cbind:rebind:"), IsAdminFilter())
+async def cb_rebind_request(callback: types.CallbackQuery, state: FSMContext):
+    """Запросить у админа новый Telegram-аккаунт для привязки."""
+    try:
+        contract_id = int(callback.data.split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    with SessionLocal() as session:
+        contract = session.query(Contract).filter(Contract.id == contract_id).first()
+        if not contract:
+            await callback.answer("Договор не найден.", show_alert=True)
+            return
+
+        current = (
+            _format_user_brief(contract.telegram_id, contract.username)
+            if contract.telegram_id else "— (не привязан)"
+        )
+        contract_num = contract.contract_num
+
+    await state.set_state(AdminSteps.waiting_for_rebind_target)
+    await state.update_data(rebind_contract_id=contract_id)
+
+    text = (
+        f"🔁 <b>Смена аккаунта для договора</b> <code>{_h(contract_num)}</code>\n\n"
+        f"Текущий аккаунт: {current}\n\n"
+        "Укажите нового владельца одним из способов:\n"
+        "1️⃣ <b>Перешлите</b> сюда любое сообщение от нужного пользователя — это самый надёжный способ.\n"
+        "2️⃣ Отправьте <code>@username</code> (без пробелов).\n"
+        "3️⃣ Отправьте <b>telegram_id</b> числом.\n\n"
+        "Для отмены нажмите «⬅️ Назад» или кнопку отмены ниже."
+    )
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data=f"cbind:cancel:{contract_id}")
+    builder.adjust(1)
+
+    await callback.message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=builder.as_markup(),
+        disable_web_page_preview=True,
+    )
+    await callback.answer()
+
+
+# --- Получение нового владельца -----------------------------------------------
+
+def _lookup_username_in_db(session, username: str):
+    """Быстрый локальный поиск telegram_id по @username в базе договоров.
+
+    Возвращает (telegram_id, normalized_username) или (None, normalized_username).
+    """
+    uname = (username or "").strip().lstrip("@")
+    if not uname:
+        return None, None
+    row = (
+        session.query(Contract.telegram_id, Contract.username)
+        .filter(func.lower(Contract.username) == uname.lower())
+        .filter(Contract.telegram_id.isnot(None))
+        .first()
+    )
+    if row and row[0]:
+        return int(row[0]), row[1] or uname
+    return None, uname
+
+
+async def _resolve_username_via_bot(bot: Bot, username: str):
+    """Спросить у Telegram chat по @username. Возвращает (id, username) или (None, None).
+
+    Работает для пользователей, которые когда-либо общались с ботом, либо для
+    публичных чатов/каналов. Для большинства частных пользователей
+    (без публичной активности) Telegram вернёт ошибку — в этом случае
+    fallback'ом останется forward или ввод telegram_id числом.
+    """
+    uname = (username or "").strip().lstrip("@")
+    if not uname:
+        return None, None
+    try:
+        chat = await bot.get_chat(f"@{uname}")
+    except Exception as e:
+        logging.info("get_chat(@%s) failed: %s", uname, e)
+        return None, None
+    if chat.type != "private":
+        # Это канал/группа, а не пользователь — не подходит
+        return None, None
+    return int(chat.id), getattr(chat, "username", None) or uname
+
+
+async def _resolve_id_via_bot(bot: Bot, telegram_id: int):
+    """Best-effort: подтянуть @username по известному telegram_id.
+
+    Работает только если бот ранее общался с пользователем. Иначе вернёт None.
+    """
+    try:
+        chat = await bot.get_chat(int(telegram_id))
+    except Exception as e:
+        logging.info("get_chat(%s) failed: %s", telegram_id, e)
+        return None
+    if chat.type != "private":
+        return None
+    return getattr(chat, "username", None)
+
+
+@router.message(AdminSteps.waiting_for_rebind_target, F.text == "❌ Отменить")
+async def cancel_rebind_target(message: types.Message, state: FSMContext):
+    await state.set_state(AdminSteps.waiting_for_contract_lookup)
+    await state.update_data(rebind_contract_id=None)
+    await message.answer(
+        "Изменение привязки отменено.\n"
+        "Введите номер другого договора или нажмите «⬅️ Назад», чтобы выйти из поиска.",
+        reply_markup=get_admin_keyboard(with_back=True),
+    )
+
+
+@router.message(AdminSteps.waiting_for_rebind_target, ~F.text.in_(ADMIN_MENU_BUTTONS))
+async def process_rebind_target(message: types.Message, state: FSMContext):
+    """Принять forward / @username / telegram_id для смены привязки."""
+    data = await state.get_data()
+    contract_id = data.get("rebind_contract_id")
+    if not contract_id:
+        await state.set_state(AdminSteps.waiting_for_contract_lookup)
+        await message.answer(
+            "Контекст потерян. Найдите договор заново и повторите операцию.",
+            reply_markup=get_admin_keyboard(with_back=True),
+        )
+        return
+
+    new_id: int | None = None
+    new_username: str | None = None
+
+    # 1) Forwarded message — наиболее надёжный путь
+    forward_origin = getattr(message, "forward_origin", None)
+    forward_from = getattr(message, "forward_from", None)
+    if forward_origin is not None:
+        # aiogram 3.x: MessageOriginUser имеет sender_user
+        sender = getattr(forward_origin, "sender_user", None)
+        if sender is not None:
+            new_id = int(sender.id)
+            new_username = sender.username
+        else:
+            # MessageOriginHiddenUser / Channel / Chat — id недоступен
+            await message.answer(
+                "⚠️ Не удалось извлечь Telegram ID из пересланного сообщения "
+                "(у пользователя скрыта пересылка). Попросите его временно отключить "
+                "приватность пересылки, либо отправьте <code>@username</code> или "
+                "<b>telegram_id</b> числом.",
+                parse_mode="HTML",
+            )
+            return
+    elif forward_from is not None:
+        new_id = int(forward_from.id)
+        new_username = forward_from.username
+    else:
+        text = (message.text or "").strip()
+        if not text:
+            await message.answer(
+                "⚠️ Пустое сообщение. Перешлите сообщение от пользователя, "
+                "либо отправьте <code>@username</code>, либо <b>telegram_id</b> числом.",
+                parse_mode="HTML",
+            )
+            return
+
+        # 2) telegram_id числом
+        digits = text.lstrip("+").replace(" ", "")
+        if digits.isdigit():
+            try:
+                new_id = int(digits)
+            except ValueError:
+                new_id = None
+            if new_id is not None:
+                # Best-effort: подтянуть username через get_chat (если бот когда-то
+                # общался с пользователем). Если не получится — оставим username пустым.
+                resolved_uname = await _resolve_id_via_bot(message.bot, new_id)
+                if resolved_uname:
+                    new_username = resolved_uname
+
+        # 3) @username
+        if new_id is None and (text.startswith("@") or text.replace("_", "").isalnum()):
+            uname_raw = text.lstrip("@").strip()
+            # 3a) Локальный кэш в базе договоров (мгновенный)
+            with SessionLocal() as session:
+                resolved_id, resolved_uname = _lookup_username_in_db(session, uname_raw)
+            # 3b) Резолв через Telegram API
+            if not resolved_id:
+                resolved_id, resolved_uname = await _resolve_username_via_bot(
+                    message.bot, uname_raw
+                )
+            if resolved_id:
+                new_id = resolved_id
+                new_username = resolved_uname or uname_raw
+            else:
+                await message.answer(
+                    f"⚠️ Не удалось найти пользователя <code>@{_h(uname_raw)}</code>.\n\n"
+                    "Telegram не отдал его профиль (так бывает, если у пользователя нет "
+                    "публичной активности и он никогда не писал боту).\n\n"
+                    "Самый надёжный способ — <b>переслать</b> сюда любое сообщение "
+                    "от этого пользователя. Либо отправьте его <b>telegram_id</b> числом.",
+                    parse_mode="HTML",
+                )
+                return
+
+        if new_id is None:
+            await message.answer(
+                "⚠️ Не удалось распознать ввод. Перешлите сообщение от пользователя, "
+                "либо отправьте <code>@username</code>, либо <b>telegram_id</b> числом.\n"
+                "Для отмены нажмите «⬅️ Назад».",
+                parse_mode="HTML",
+            )
+            return
+
+    # Получили (new_id [, new_username]). Показываем подтверждение.
+    with SessionLocal() as session:
+        contract = session.query(Contract).filter(Contract.id == contract_id).first()
+        if not contract:
+            await state.set_state(AdminSteps.waiting_for_contract_lookup)
+            await state.update_data(rebind_contract_id=None)
+            await message.answer(
+                "Договор больше не найден. Найдите его заново.",
+                reply_markup=get_admin_keyboard(with_back=True),
+            )
+            return
+
+        old_id = contract.telegram_id
+        old_username = contract.username
+        contract_num = contract.contract_num
+
+    if old_id == new_id:
+        await message.answer(
+            "ℹ️ Этот аккаунт уже привязан к договору. Изменений не требуется.\n"
+            "Введите другого пользователя или нажмите «⬅️ Назад».",
+        )
+        return
+
+    await state.update_data(
+        rebind_new_id=new_id,
+        rebind_new_username=new_username,
+    )
+
+    text = (
+        f"⚠️ Подтвердите <b>смену привязки</b> договора "
+        f"<code>{_h(contract_num)}</code>.\n\n"
+        f"Было: {_format_user_brief(old_id, old_username)}\n"
+        f"Будет: {_format_user_brief(new_id, new_username)}\n\n"
+        "Существующие записи и в БД сохранятся вместе с информацией о том, "
+        "кто их создал. Новый владелец сможет создавать новые записи по этому договору."
+    )
+
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=_confirm_kb("rebind", contract_id),
+        disable_web_page_preview=True,
+    )
+
+
+@router.callback_query(F.data.startswith("cbind:rebind_yes:"), IsAdminFilter())
+async def cb_rebind_apply(callback: types.CallbackQuery, state: FSMContext):
+    """Выполнить смену привязки договора."""
+    try:
+        contract_id = int(callback.data.split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    if data.get("rebind_contract_id") != contract_id:
+        await callback.answer("Контекст истёк. Начните операцию заново.", show_alert=True)
+        return
+
+    new_id = data.get("rebind_new_id")
+    new_username = data.get("rebind_new_username")
+    if not new_id:
+        await callback.answer("Контекст истёк. Начните операцию заново.", show_alert=True)
+        return
+
+    admin_id = callback.from_user.id
+    admin_username = callback.from_user.username
+
+    try:
+        with SessionLocal() as session:
+            contract = session.query(Contract).filter(Contract.id == contract_id).first()
+            if not contract:
+                await callback.answer("Договор не найден.", show_alert=True)
+                return
+
+            old_id = contract.telegram_id
+            old_username = contract.username
+
+            contract.telegram_id = int(new_id)
+            contract.username = new_username
+            contract.href = build_tg_href(int(new_id), new_username)
+
+            _log_binding_change(
+                session,
+                contract=contract,
+                action="rebind" if old_id else "bind",
+                old_telegram_id=old_id,
+                old_username=old_username,
+                new_telegram_id=int(new_id),
+                new_username=new_username,
+                admin_telegram_id=admin_id,
+                admin_username=admin_username,
+            )
+            session.commit()
+
+            bookings = (
+                session.query(Booking)
+                .filter(Booking.contract_id == contract.id)
+                .all()
+            )
+            text = _format_contract_info(contract, bookings)
+            kb = _build_contract_actions_kb(contract)
+    except Exception as e:
+        logging.exception("Ошибка при смене привязки договора %s", contract_id)
+        await callback.message.answer(
+            f"❌ Не удалось сменить привязку: {_h(str(e))}",
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    await state.set_state(AdminSteps.waiting_for_contract_lookup)
+    await state.update_data(
+        rebind_contract_id=None,
+        rebind_new_id=None,
+        rebind_new_username=None,
+    )
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await callback.message.answer("✅ Привязка обновлена. Актуальная карточка ниже:")
+    await callback.message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=kb,
+        disable_web_page_preview=True,
+    )
+    await callback.message.answer(
         "Введите номер другого договора или нажмите «⬅️ Назад», "
         "чтобы выйти из поиска.",
         reply_markup=get_admin_keyboard(with_back=True),
     )
+    await callback.answer("Готово")
+

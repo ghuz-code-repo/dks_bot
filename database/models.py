@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, Time, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, Date, Time, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship, declarative_base
 
 Base = declarative_base()
@@ -72,3 +72,20 @@ class Booking(Base):
     reminder_hour_sent = Column(Boolean, default=False)
     is_cancelled = Column(Boolean, default=False)  # Флаг отмены
     contract = relationship("Contract", back_populates="bookings")
+
+
+class ContractBindingLog(Base):
+    """Журнал изменений привязки договора к Telegram-аккаунту."""
+    __tablename__ = 'contract_binding_log'
+    id = Column(Integer, primary_key=True)
+    contract_id = Column(Integer, ForeignKey('contracts.id'), index=True, nullable=False)
+    contract_num = Column(String, index=True, nullable=True)
+    action = Column(String, nullable=False)  # 'unbind' | 'rebind' | 'bind'
+    old_telegram_id = Column(Integer, nullable=True)
+    old_username = Column(String, nullable=True)
+    new_telegram_id = Column(Integer, nullable=True)
+    new_username = Column(String, nullable=True)
+    admin_telegram_id = Column(Integer, index=True, nullable=False)
+    admin_username = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+    note = Column(String, nullable=True)
