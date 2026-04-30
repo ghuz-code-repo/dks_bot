@@ -950,6 +950,9 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
                 'entrance': old_contract.entrance if old_contract else 'N/A',
                 'floor': old_contract.floor if old_contract else 'N/A',
                 'contract_num': old_contract.contract_num if old_contract else 'N/A',
+                'phone': old_booking.client_phone,
+                'tg_id': old_contract.telegram_id if old_contract else None,
+                'username': old_contract.username if old_contract else None,
             })
 
         new_booking = Booking(
@@ -968,6 +971,8 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
                 cancel_notification = (
                     f"🔄 **Запись отменена (перезапись)!**\n\n"
                     f"👤 Клиент: {ci['fio']}\n"
+                    f"📞 Тел: {ci['phone'] or '—'}\n"
+                    f"💬 TG: {format_tg_contact_md(ci['tg_id'], ci['username'])}\n"
                     f"🏠 Объект: {house_name}\n"
                     f"🏢 Кв. {ci['apt_num']}, подъезд {ci['entrance']}, этаж {ci['floor']}\n"
                     f"📄 Договор: {ci['contract_num']}\n"
