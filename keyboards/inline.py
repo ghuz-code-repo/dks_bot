@@ -12,6 +12,25 @@ TIME_SLOTS = ["09:00", "10:00", "11:00", "13:00", "14:00", "16:00"]
 SLOTS_PER_DAY = len(TIME_SLOTS)  # 6 слотов
 
 
+def build_tg_profile_kb(telegram_id: int | None, username: str | None) -> "types.InlineKeyboardMarkup | None":
+    """Кнопка-ссылка на профиль клиента в Telegram.
+
+    Возвращает None, если ни telegram_id, ни username не известны.
+    Использует tg://user?id=... как фолбэк — открывается внутри Telegram-клиента.
+    """
+    if not telegram_id and not username:
+        return None
+    if username:
+        url = f"https://t.me/{username}"
+        text = f"👤 Открыть @{username}"
+    else:
+        url = f"tg://user?id={telegram_id}"
+        text = "👤 Открыть профиль клиента"
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text=text, url=url))
+    return builder.as_markup()
+
+
 def get_next_working_day(from_date: date) -> date:
     """Возвращает следующий рабочий день после указанной даты (пропускает выходные и праздники)"""
     # Получаем праздничные дни на ближайшие 30 дней

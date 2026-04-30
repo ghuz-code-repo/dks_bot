@@ -227,7 +227,7 @@ class TestReplyKeyboardsUseBack:
         from keyboards.reply import get_admin_keyboard
         kb = get_admin_keyboard(with_back=True)
         assert kb.keyboard[0][0].text == "🔙 Назад"
-        assert len(kb.keyboard) == 4  # back + 3 rows of menu
+        assert len(kb.keyboard) == 5  # back + 4 rows of menu
 
     @pytest.mark.asyncio
     async def test_admin_keyboard_without_back(self):
@@ -236,7 +236,7 @@ class TestReplyKeyboardsUseBack:
         kb = get_admin_keyboard()
         buttons = [btn.text for row in kb.keyboard for btn in row]
         assert "🔙 Назад" not in buttons
-        assert len(kb.keyboard) == 3
+        assert len(kb.keyboard) == 4
 
     @pytest.mark.asyncio
     async def test_back_button_first_in_staff_keyboard(self):

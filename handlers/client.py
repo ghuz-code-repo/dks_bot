@@ -12,7 +12,7 @@ from sqlalchemy import func, or_
 from config import ADMIN_ID, DKS_CONTACTS
 from database.models import Booking, Setting, Contract, Staff, ProjectSlots
 from database.session import SessionLocal
-from keyboards.inline import generate_time_slots, generate_calendar, get_min_booking_date, get_fully_booked_dates, SLOTS_PER_DAY, TASHKENT_TZ
+from keyboards.inline import generate_time_slots, generate_calendar, get_min_booking_date, get_fully_booked_dates, SLOTS_PER_DAY, TASHKENT_TZ, build_tg_profile_kb
 from utils.holidays import get_holiday_dates
 from keyboards.reply import get_phone_request_keyboard, get_client_keyboard, BUTTON_TEXTS
 from utils.states import ClientSteps
@@ -660,10 +660,15 @@ async def rebook_accepted(callback: types.CallbackQuery, state: FSMContext, bot:
             if ADMIN_ID not in recipients:
                 recipients.append(ADMIN_ID)
 
+            tg_kb = build_tg_profile_kb(
+                old_contract.telegram_id if old_contract else None,
+                old_contract.username if old_contract else None,
+            )
+
             async def send_rebook_notifications():
                 for emp_id in recipients:
                     try:
-                        await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown")
+                        await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown", reply_markup=tg_kb)
                     except Exception as e:
                         logging.error(f"Ошибка уведомления {emp_id}: {e}")
 
@@ -985,10 +990,12 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
                 if ADMIN_ID not in recipients:
                     recipients.append(ADMIN_ID)
 
-                async def _send_cancel(text=cancel_notification, recips=list(recipients)):
+                tg_kb = build_tg_profile_kb(ci.get('tg_id'), ci.get('username'))
+
+                async def _send_cancel(text=cancel_notification, recips=list(recipients), kb=tg_kb):
                     for emp_id in recips:
                         try:
-                            await bot.send_message(chat_id=emp_id, text=text, parse_mode="Markdown")
+                            await bot.send_message(chat_id=emp_id, text=text, parse_mode="Markdown", reply_markup=kb)
                         except Exception as e:
                             logging.error(f"Ошибка уведомления {emp_id}: {e}")
 
@@ -1010,10 +1017,12 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
         if ADMIN_ID not in recipients:
             recipients.append(ADMIN_ID)
 
+        tg_kb = build_tg_profile_kb(contract.telegram_id, contract.username)
+
         async def send_booking_notifications():
             for emp_id in recipients:
                 try:
-                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown")
+                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown", reply_markup=tg_kb)
                 except Exception as e:
                     logging.error(f"Ошибка уведомления {emp_id}: {e}")
 
@@ -2293,11 +2302,13 @@ async def process_phone_booking_callback(callback: types.CallbackQuery, state: F
         if ADMIN_ID not in recipients:
             recipients.append(ADMIN_ID)
 
+        tg_kb = build_tg_profile_kb(contract.telegram_id, contract.username)
+
         # Отправляем уведомления в фоновом режиме
         async def send_booking_notifications():
             for emp_id in recipients:
                 try:
-                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown")
+                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown", reply_markup=tg_kb)
                 except Exception as e:
                     logging.error(f"Ошибка уведомления {emp_id}: {e}")
         
@@ -2461,11 +2472,13 @@ async def process_phone_booking(message: types.Message, state: FSMContext, bot: 
         if ADMIN_ID not in recipients:
             recipients.append(ADMIN_ID)
 
+        tg_kb = build_tg_profile_kb(contract.telegram_id, contract.username)
+
         # Отправляем уведомления в фоновом режиме
         async def send_booking_notifications():
             for emp_id in recipients:
                 try:
-                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown")
+                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown", reply_markup=tg_kb)
                 except Exception as e:
                     logging.error(f"Ошибка уведомления {emp_id}: {e}")
         
