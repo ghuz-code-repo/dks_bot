@@ -643,6 +643,8 @@ async def rebook_accepted(callback: types.CallbackQuery, state: FSMContext, bot:
             notification_text = (
                 f"🔄 **Запись отменена (перезапись)!**\n\n"
                 f"👤 Клиент: {old_contract.client_fio if old_contract else 'N/A'}\n"
+                f"📞 Тел: {old_booking.client_phone or '—'}\n"
+                f"💬 TG: {format_tg_contact_md(old_contract.telegram_id if old_contract else None, old_contract.username if old_contract else None)}\n"
                 f"🏠 Объект: {house_name}\n"
             )
             if old_contract:
@@ -1732,6 +1734,7 @@ async def confirm_cancel_booking(callback: types.CallbackQuery, state: FSMContex
             f"❌ **Запись отменена!**\n\n"
             f"👤 Клиент: {contract.client_fio}\n"
             f"📞 Тел: {booking.client_phone}\n"
+            f"💬 TG: {format_tg_contact_md(contract.telegram_id, contract.username)}\n"
             f"🏠 Объект: {contract.house_name}\n"
             f"🏢 Кв. {contract.apt_num}, подъезд {contract.entrance}, этаж {contract.floor}\n"
             f"📄 Договор: {contract.contract_num}\n"
@@ -1743,11 +1746,13 @@ async def confirm_cancel_booking(callback: types.CallbackQuery, state: FSMContex
         if ADMIN_ID not in recipients:
             recipients.append(ADMIN_ID)
         
+        tg_kb = build_tg_profile_kb(contract.telegram_id, contract.username)
+        
         # Отправляем уведомления в фоновом режиме
         async def send_cancel_notifications():
             for emp_id in recipients:
                 try:
-                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown")
+                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown", reply_markup=tg_kb)
                 except Exception as e:
                     logging.error(f"Ошибка уведомления {emp_id}: {e}")
         
