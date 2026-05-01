@@ -19,12 +19,12 @@ from database.session import SessionLocal
 from utils.excel_reader import process_excel_file, analyze_excel_changes, apply_contract_changes, export_project_contracts
 from utils.holidays import generate_holidays_excel, import_holidays_from_excel, get_all_holidays
 from utils.states import AdminSteps
-from utils.language import format_tg_contact_md, format_tg_contact_html, build_tg_href
+from utils.language import format_tg_contact_md, format_tg_contact_html, build_tg_href, get_user_language, get_message
 from keyboards.reply import (
     get_admin_keyboard, get_staff_management_keyboard, 
     get_slots_management_keyboard, get_cancel_keyboard
 )
-from keyboards.inline import generate_houses_kb
+from keyboards.inline import generate_houses_kb, build_tg_profile_kb
 
 router = Router()
 
@@ -177,6 +177,7 @@ async def _handle_back_navigation(message: types.Message, state: FSMContext):
         AdminSteps.edit_project_select,
         AdminSteps.update_contracts_selecting_project,
         AdminSteps.holidays_waiting_excel,
+        AdminSteps.holidays_conflict_resolving,
     ):
         await state.clear()
         await message.answer("⚙️ Настройки проектов\n\nВыберите действие:", reply_markup=get_slots_management_keyboard())
@@ -2569,6 +2570,64 @@ async def holidays_process_excel(message: types.Message, bot: Bot, state: FSMCon
                 parse_mode="Markdown",
                 reply_markup=get_slots_management_keyboard()
             )
+
+            # Проверяем активные записи на новых праздничных датах
+            from datetime import date as _date
+            today = _date.today()
+            with SessionLocal() as session:
+                holiday_dates = [h.date for h in holidays if h.date >= today]
+                if holiday_dates:
+                    conflicts = (
+                        session.query(Booking)
+                        .filter(
+                            Booking.is_cancelled == False,
+                            Booking.date.in_(holiday_dates),
+                        )
+                        .order_by(Booking.date, Booking.time_slot)
+                        .all()
+                    )
+                else:
+                    conflicts = []
+
+                if conflicts:
+                    conflict_lines = []
+                    booking_ids = []
+                    for b in conflicts:
+                        contract = session.query(Contract).filter(Contract.id == b.contract_id).first()
+                        booking_ids.append(b.id)
+                        fio = contract.client_fio if contract else 'N/A'
+                        cnum = contract.contract_num if contract else 'N/A'
+                        house = contract.house_name if contract else ''
+                        apt = contract.apt_num if contract else ''
+                        conflict_lines.append(
+                            f"  • {b.date.strftime('%d.%m.%Y')} {b.time_slot.strftime('%H:%M')} — "
+                            f"{fio} (дог. {cnum}, {house}, кв. {apt})"
+                        )
+
+                    await state.update_data(conflict_booking_ids=booking_ids)
+                    await state.set_state(AdminSteps.holidays_conflict_resolving)
+
+                    from aiogram.utils.keyboard import InlineKeyboardBuilder
+                    kb = InlineKeyboardBuilder()
+                    kb.button(text="✅ Отменить и уведомить", callback_data="hol_conflict:cancel")
+                    kb.button(text="⏭ Оставить как есть", callback_data="hol_conflict:keep")
+                    kb.adjust(1)
+
+                    text_lines = "\n".join(conflict_lines)
+                    await message.answer(
+                        f"⚠️ Найдены активные записи на новых праздничных днях ({len(conflicts)}):\n\n"
+                        f"{text_lines}\n\n"
+                        f"Что сделать?\n"
+                        f"• «Отменить и уведомить» — пометить записи как отменённые "
+                        f"и разослать уведомления клиентам и сотрудникам.\n"
+                        f"• «Оставить как есть» — записи останутся активными в БД "
+                        f"(но клиенты не смогут их перезаписать через бот, т.к. дата теперь нерабочая).",
+                        reply_markup=kb.as_markup()
+                    )
+                    # state cleared inside callback; don't clear here
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                    return
         else:
             await message.answer(
                 "✅ Список праздничных дней очищен (файл не содержит дат).",
@@ -2609,6 +2668,130 @@ async def holidays_wrong_type(message: types.Message, state: FSMContext):
     await message.answer(
         "⚠️ Пожалуйста, отправьте Excel-файл (.xlsx или .xls) с праздничными днями."
     )
+
+
+@router.callback_query(F.data == "hol_conflict:keep", AdminSteps.holidays_conflict_resolving)
+async def holidays_conflict_keep(callback: types.CallbackQuery, state: FSMContext):
+    """Оставить конфликтующие записи без изменений."""
+    await state.clear()
+    try:
+        await callback.message.edit_text(
+            "⏭ Записи оставлены без изменений. Помните, что клиенты не смогут "
+            "перезаписаться через бот на эти даты — потребуется ручная коммуникация."
+        )
+    except Exception:
+        pass
+    await callback.message.answer(
+        "⚙️ Настройки проектов\n\nВыберите действие:",
+        reply_markup=get_slots_management_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "hol_conflict:cancel", AdminSteps.holidays_conflict_resolving)
+async def holidays_conflict_cancel(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    """Отменить конфликтующие записи и уведомить клиентов и сотрудников."""
+    data = await state.get_data()
+    booking_ids = data.get('conflict_booking_ids', []) or []
+    await state.clear()
+
+    if not booking_ids:
+        try:
+            await callback.message.edit_text("ℹ️ Нет записей для отмены.")
+        except Exception:
+            pass
+        await callback.message.answer(
+            "⚙️ Настройки проектов\n\nВыберите действие:",
+            reply_markup=get_slots_management_keyboard()
+        )
+        await callback.answer()
+        return
+
+    cancelled_payloads = []  # для рассылки сотрудникам
+    client_notifications = []  # (user_telegram_id, lang, date_str, time_str)
+
+    with SessionLocal() as session:
+        bookings = (
+            session.query(Booking)
+            .filter(Booking.id.in_(booking_ids), Booking.is_cancelled == False)
+            .all()
+        )
+        recipients = [r[0] for r in session.query(Staff.telegram_id).all()]
+        if ADMIN_ID not in recipients:
+            recipients.append(ADMIN_ID)
+
+        for b in bookings:
+            contract = session.query(Contract).filter(Contract.id == b.contract_id).first()
+            b.is_cancelled = True
+
+            date_str = b.date.strftime('%d.%m.%Y')
+            time_str = b.time_slot.strftime('%H:%M')
+
+            cancelled_payloads.append({
+                'fio': contract.client_fio if contract else 'N/A',
+                'phone': b.client_phone or '—',
+                'tg_id': contract.telegram_id if contract else None,
+                'username': contract.username if contract else None,
+                'house': contract.house_name if contract else '',
+                'apt': contract.apt_num if contract else '',
+                'entrance': contract.entrance if contract else '',
+                'floor': contract.floor if contract else '',
+                'contract_num': contract.contract_num if contract else 'N/A',
+                'date': date_str,
+                'time': time_str,
+            })
+
+            if b.user_telegram_id:
+                lang = get_user_language(b.user_telegram_id)
+                client_notifications.append((b.user_telegram_id, lang, date_str, time_str))
+
+        session.commit()
+
+    # Рассылка уведомлений
+    async def _broadcast():
+        # Клиентам
+        for uid, lang, dstr, tstr in client_notifications:
+            try:
+                await bot.send_message(
+                    chat_id=uid,
+                    text=get_message('booking_cancelled_holiday', lang, date=dstr, time=tstr),
+                )
+            except Exception as e:
+                logging.error(f"Не удалось уведомить клиента {uid}: {e}")
+        # Сотрудникам
+        for p in cancelled_payloads:
+            text = (
+                f"❌ **Запись отменена (праздничный день)!**\n\n"
+                f"👤 Клиент: {p['fio']}\n"
+                f"📞 Тел: {p['phone']}\n"
+                f"💬 TG: {format_tg_contact_md(p['tg_id'], p['username'])}\n"
+                f"🏠 Объект: {p['house']}\n"
+                f"🏢 Кв. {p['apt']}, подъезд {p['entrance']}, этаж {p['floor']}\n"
+                f"📄 Договор: {p['contract_num']}\n"
+                f"📅 Дата: {p['date']}\n"
+                f"⏰ Время: {p['time']}"
+            )
+            kb = build_tg_profile_kb(p['tg_id'], p['username'])
+            for emp_id in recipients:
+                try:
+                    await bot.send_message(chat_id=emp_id, text=text, parse_mode="Markdown", reply_markup=kb)
+                except Exception as e:
+                    logging.error(f"Ошибка уведомления {emp_id}: {e}")
+
+    asyncio.create_task(_broadcast())
+
+    try:
+        await callback.message.edit_text(
+            f"✅ Отменено записей: {len(cancelled_payloads)}.\n"
+            f"Уведомления клиентам и сотрудникам отправлены."
+        )
+    except Exception:
+        pass
+    await callback.message.answer(
+        "⚙️ Настройки проектов\n\nВыберите действие:",
+        reply_markup=get_slots_management_keyboard()
+    )
+    await callback.answer()
 
 
 # ====================================================================

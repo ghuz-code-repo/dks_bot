@@ -260,6 +260,18 @@ MESSAGES = {
         'ru': '✅ Запись на {date} в {time} отменена.',
         'uz': '✅ {date} kuni soat {time} dagi yozuv bekor qilindi.'
     },
+    'booking_cancelled_holiday': {
+        'ru': (
+            'ℹ️ Ваша запись на {date} в {time} отменена, '
+            'так как этот день стал праздничным/нерабочим.\n\n'
+            'Пожалуйста, выберите другую дату через кнопку «📝 Записаться на приём».'
+        ),
+        'uz': (
+            'ℹ️ {date} kuni soat {time} dagi yozuvingiz bekor qilindi, '
+            'chunki bu kun bayram/dam olish kuniga aylandi.\n\n'
+            'Iltimos, «📝 Qabulga yozilish» tugmasi orqali boshqa sanani tanlang.'
+        )
+    },
     'cancel_aborted': {
         'ru': '❌ Отмена записи отменена.',
         'uz': '❌ Yozuvni bekor qilish bekor qilindi.'
