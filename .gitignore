@@ -15,3 +15,6 @@ data_test/comparison_result.xlsx
 data_test/result.json
 data/*.xlsx
 data_test/*.xlsx
+changes.patch
+data_test/app.db-shm
+data_test/app.db-wal
