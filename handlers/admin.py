@@ -2727,11 +2727,18 @@ async def holidays_conflict_cancel(callback: types.CallbackQuery, state: FSMCont
             date_str = b.date.strftime('%d.%m.%Y')
             time_str = b.time_slot.strftime('%H:%M')
 
+            # TG-контакт берём из записи (создатель), а не из договора (привязка могла смениться).
+            b_creator_id = b.user_telegram_id
+            b_creator_username = (
+                contract.username
+                if contract and contract.telegram_id == b_creator_id
+                else None
+            )
             cancelled_payloads.append({
                 'fio': contract.client_fio if contract else 'N/A',
                 'phone': b.client_phone or '—',
-                'tg_id': contract.telegram_id if contract else None,
-                'username': contract.username if contract else None,
+                'tg_id': b_creator_id,
+                'username': b_creator_username,
                 'house': contract.house_name if contract else '',
                 'apt': contract.apt_num if contract else '',
                 'entrance': contract.entrance if contract else '',

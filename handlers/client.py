@@ -7,7 +7,7 @@ from aiogram import Router, F, types, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.types import ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import func, or_
+from sqlalchemy import func
 
 from config import ADMIN_ID, DKS_CONTACTS
 from database.models import Booking, Setting, Contract, Staff, ProjectSlots
@@ -161,16 +161,13 @@ async def cancel_booking_button(message: types.Message, state: FSMContext):
     lang = get_user_language(user_id)
     
     with SessionLocal() as session:
-        # Получаем активные записи пользователя (по user_telegram_id или contract.telegram_id)
+        # Показываем записи по привязке договора — единственный источник истины
         today = date.today()
         bookings = (
             session.query(Booking, Contract)
             .join(Contract, Booking.contract_id == Contract.id)
             .filter(
-                or_(
-                    Booking.user_telegram_id == user_id,
-                    Contract.telegram_id == user_id
-                ),
+                Contract.telegram_id == user_id,
                 Booking.date >= today,
                 Booking.is_cancelled == False
             )
@@ -240,15 +237,12 @@ async def my_bookings_button(message: types.Message, state: FSMContext):
     
     with SessionLocal() as session:
         today = date.today()
-        # Ищем записи пользователя по user_telegram_id ИЛИ по contract.telegram_id (для старых записей)
+        # Показываем записи по привязке договора — единственный источник истины
         bookings = (
             session.query(Booking, Contract)
             .join(Contract, Booking.contract_id == Contract.id)
             .filter(
-                or_(
-                    Booking.user_telegram_id == user_id,
-                    Contract.telegram_id == user_id
-                ),
+                Contract.telegram_id == user_id,
                 Booking.date >= today,
                 Booking.is_cancelled == False
             )
@@ -317,15 +311,12 @@ async def view_calendar_button(message: types.Message, state: FSMContext):
     today = date.today()
 
     with SessionLocal() as session:
-        # Ищем активные (не отменённые, будущие) записи пользователя
+        # Показываем записи по привязке договора — единственный источник истины
         active_bookings = (
             session.query(Booking)
             .join(Contract, Booking.contract_id == Contract.id)
             .filter(
-                or_(
-                    Booking.user_telegram_id == user_id,
-                    Contract.telegram_id == user_id
-                ),
+                Contract.telegram_id == user_id,
                 Booking.date >= today,
                 Booking.is_cancelled == False
             )
@@ -380,21 +371,16 @@ async def _show_calendar_for_house(message_or_callback, state: FSMContext, user_
     # Получаем лимит слотов для проекта
     slots_limit = get_project_slot_limit(session, house_name)
 
-    # Проверяем наличие активной записи
+    # Проверяем наличие активной записи по привязке договора
     active_booking = (
         session.query(Booking)
+        .join(Contract, Booking.contract_id == Contract.id)
         .filter(
-            or_(
-                Booking.user_telegram_id == user_id,
-                Booking.contract_id.in_(
-                    session.query(Contract.id).filter(Contract.telegram_id == user_id)
-                )
-            ),
+            Contract.telegram_id == user_id,
+            Contract.house_name == house_name,
             Booking.date >= today,
             Booking.is_cancelled == False
         )
-        .join(Contract, Booking.contract_id == Contract.id)
-        .filter(Contract.house_name == house_name)
         .order_by(Booking.date)
         .first()
     )
@@ -639,12 +625,19 @@ async def rebook_accepted(callback: types.CallbackQuery, state: FSMContext, bot:
 
             session.commit()
 
-            # Уведомляем сотрудников об отмене
+            # Уведомляем сотрудников об отмене.
+            # TG-контакт берём из записи (создатель), а не из договора (привязка могла смениться).
+            creator_id = old_booking.user_telegram_id
+            creator_username = (
+                old_contract.username
+                if old_contract and old_contract.telegram_id == creator_id
+                else None
+            )
             notification_text = (
                 f"🔄 **Запись отменена (перезапись)!**\n\n"
                 f"👤 Клиент: {old_contract.client_fio if old_contract else 'N/A'}\n"
                 f"📞 Тел: {old_booking.client_phone or '—'}\n"
-                f"💬 TG: {format_tg_contact_md(old_contract.telegram_id if old_contract else None, old_contract.username if old_contract else None)}\n"
+                f"💬 TG: {format_tg_contact_md(creator_id, creator_username)}\n"
                 f"🏠 Объект: {house_name}\n"
             )
             if old_contract:
@@ -662,10 +655,7 @@ async def rebook_accepted(callback: types.CallbackQuery, state: FSMContext, bot:
             if ADMIN_ID not in recipients:
                 recipients.append(ADMIN_ID)
 
-            tg_kb = build_tg_profile_kb(
-                old_contract.telegram_id if old_contract else None,
-                old_contract.username if old_contract else None,
-            )
+            tg_kb = build_tg_profile_kb(creator_id, creator_username)
 
             async def send_rebook_notifications():
                 for emp_id in recipients:
@@ -928,16 +918,13 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
             contract.username = source.from_user.username
             contract.href = build_tg_href(user_id, source.from_user.username)
 
-        # Отменяем все активные записи пользователя на этот ЖК перед созданием новой
+        # Отменяем все активные записи по договорам этого пользователя на ЖК
         today = date.today()
         active_bookings = (
             session.query(Booking)
             .join(Contract, Booking.contract_id == Contract.id)
             .filter(
-                or_(
-                    Booking.user_telegram_id == user_id,
-                    Contract.telegram_id == user_id
-                ),
+                Contract.telegram_id == user_id,
                 Contract.house_name == house_name,
                 Booking.date >= today,
                 Booking.is_cancelled == False
@@ -949,6 +936,13 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
         for old_booking in active_bookings:
             old_booking.is_cancelled = True
             old_contract = session.query(Contract).filter(Contract.id == old_booking.contract_id).first()
+            # TG-контакт берём из записи (создатель), а не из договора (привязка могла смениться).
+            b_creator_id = old_booking.user_telegram_id
+            b_creator_username = (
+                old_contract.username
+                if old_contract and old_contract.telegram_id == b_creator_id
+                else None
+            )
             cancelled_info.append({
                 'date': old_booking.date.strftime('%d.%m.%Y'),
                 'time': old_booking.time_slot.strftime('%H:%M'),
@@ -958,8 +952,8 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
                 'floor': old_contract.floor if old_contract else 'N/A',
                 'contract_num': old_contract.contract_num if old_contract else 'N/A',
                 'phone': old_booking.client_phone,
-                'tg_id': old_contract.telegram_id if old_contract else None,
-                'username': old_contract.username if old_contract else None,
+                'tg_id': b_creator_id,
+                'username': b_creator_username,
             })
 
         new_booking = Booking(
@@ -1085,10 +1079,7 @@ async def _resend_cancel_selecting_booking(message: types.Message, user_id: int,
             session.query(Booking, Contract)
             .join(Contract, Booking.contract_id == Contract.id)
             .filter(
-                or_(
-                    Booking.user_telegram_id == user_id,
-                    Contract.telegram_id == user_id
-                ),
+                Contract.telegram_id == user_id,
                 Booking.date >= today,
                 Booking.is_cancelled == False
             )
@@ -1178,10 +1169,7 @@ async def _resend_calendar_selecting_booking(message: types.Message, user_id: in
             session.query(Booking)
             .join(Contract, Booking.contract_id == Contract.id)
             .filter(
-                or_(
-                    Booking.user_telegram_id == user_id,
-                    Contract.telegram_id == user_id
-                ),
+                Contract.telegram_id == user_id,
                 Booking.date >= today,
                 Booking.is_cancelled == False
             )
@@ -1814,112 +1802,37 @@ async def contract_entered(message: types.Message, state: FSMContext):
             )
             .first()
         )
-        
+
         if existing_booking:
-            # Определяем владельца записи (user_telegram_id или contract.telegram_id для старых записей)
-            booking_owner = existing_booking.user_telegram_id or contract.telegram_id
-            
-            # Если можем определить владельца и это не текущий пользователь - просим ввести другой договор
-            if booking_owner and booking_owner != user_id:
-                await message.answer(
-                    get_message('contract_unavailable', lang)
-                )
-                return
-            else:
-                # Это владелец договора — запоминаем ID старой записи для отложенной отмены
-                # Отмена произойдёт только при создании новой записи (атомарно)
-                await state.update_data(pending_cancel_booking_id=existing_booking.id)
-                logging.info(
-                    f"Отложенная отмена записи #{existing_booking.id} (user={user_id}, "
-                    f"date={existing_booking.date}) при повторной первичной записи"
-                )
-        
-        # Проверяем прошлые записи для определения владельца и периода ожидания
-        # Учитываем только неотменённые записи — если админ отменил запись и отвязал ТГ,
-        # отменённые записи не должны блокировать нового пользователя
-        first_booking = (
-            session.query(Booking)
-            .filter(
-                Booking.contract_id == contract.id,
-                Booking.is_cancelled == False
+            # Договор не привязан (прошли выше проверку), значит запись могла создать
+            # предыдущая привязка. Помечаем для отложенной отмены — она произойдёт
+            # атомарно при создании новой записи.
+            await state.update_data(pending_cancel_booking_id=existing_booking.id)
+            logging.info(
+                f"Отложенная отмена записи #{existing_booking.id} (user={user_id}, "
+                f"date={existing_booking.date}) при повторной первичной записи"
             )
-            .order_by(Booking.date.asc())
-            .first()
-        )
-        
-        last_booking = (
-            session.query(Booking)
-            .filter(
-                Booking.contract_id == contract.id,
-                Booking.is_cancelled == False
-            )
-            .order_by(Booking.date.desc())
-            .first()
-        )
-        
-        # Для 2-недельного периода ожидания - учитываем только неотменённые записи
-        any_user_booking = (
+
+        # Определяем минимальную дату для записи
+        min_booking_date = get_min_booking_date()
+
+        # Cooldown 2 недели: считаем по записям, созданным этим пользователем.
+        # Авторитет — contract.telegram_id; user_telegram_id в записях используем
+        # только для cooldown-логики, не для определения "владельца".
+        last_user_booking = (
             session.query(Booking)
             .filter(
                 Booking.contract_id == contract.id,
                 Booking.user_telegram_id == user_id,
                 Booking.is_cancelled == False
             )
+            .order_by(Booking.date.desc())
             .first()
         )
-        
-        # Определяем минимальную дату для записи
-        min_booking_date = get_min_booking_date()
-        
-        # Определяем владельца ТОЛЬКО по user_telegram_id первой записи
-        # contract.telegram_id не используем для определения владельца (legacy data)
-        contract_owner_id = None
-        if first_booking and first_booking.user_telegram_id:
-            contract_owner_id = first_booking.user_telegram_id
-        
-        # Если есть владелец (с user_telegram_id) и это не текущий пользователь - просим ввести другой договор
-        if contract_owner_id and contract_owner_id != user_id:
-            await message.answer(
-                get_message('contract_unavailable', lang)
-            )
-            return
-        
-        # Если у пользователя были любые записи на этот договор (включая отменённые) - ждать 2 недели
-        # Проверяем по user_telegram_id или по contract.telegram_id (для старых записей без user_telegram_id)
-        user_has_past_bookings = (
-            any_user_booking is not None or
-            contract.telegram_id == user_id
-        )
-        
-        if user_has_past_bookings:
-            # Находим последнюю неотменённую запись пользователя на этот договор
-            last_user_booking = (
-                session.query(Booking)
-                .filter(
-                    Booking.contract_id == contract.id,
-                    Booking.user_telegram_id == user_id,
-                    Booking.is_cancelled == False
-                )
-                .order_by(Booking.date.desc())
-                .first()
-            )
-            
-            # Если не нашли по user_telegram_id, проверяем по старому contract.telegram_id
-            if not last_user_booking and contract.telegram_id == user_id:
-                last_user_booking = (
-                    session.query(Booking)
-                    .filter(
-                        Booking.contract_id == contract.id,
-                        Booking.is_cancelled == False
-                    )
-                    .order_by(Booking.date.desc())
-                    .first()
-                )
-            
-            # Для владельца договора - минимум 2 недели от даты последней записи
-            if last_user_booking:
-                two_weeks_from_last_booking = last_user_booking.date + timedelta(days=14)
-                min_booking_date = max(min_booking_date, two_weeks_from_last_booking)
+
+        if last_user_booking:
+            two_weeks_from_last_booking = last_user_booking.date + timedelta(days=14)
+            min_booking_date = max(min_booking_date, two_weeks_from_last_booking)
         
         # Если delivery_date позже - берём её
         if contract.delivery_date and contract.delivery_date > min_booking_date:
