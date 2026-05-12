@@ -3013,6 +3013,14 @@ def _build_contract_actions_kb(contract: Contract):
     """Inline-клавиатура с действиями над договором (под карточкой)."""
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     builder = InlineKeyboardBuilder()
+    if contract.telegram_id or contract.username:
+        if contract.username:
+            url = f"https://t.me/{contract.username}"
+            text = f"👤 Открыть @{contract.username}"
+        else:
+            url = f"tg://user?id={contract.telegram_id}"
+            text = "👤 Открыть профиль клиента"
+        builder.button(text=text, url=url)
     if contract.telegram_id:
         builder.button(
             text="🔓 Отвязать аккаунт",

@@ -127,19 +127,34 @@ class TestKeyboards:
         c = MagicMock(spec=Contract)
         c.id = 7
         c.telegram_id = 999
+        c.username = None
         markup = _build_contract_actions_kb(c)
         labels = [b.text for row in markup.inline_keyboard for b in row]
+        assert "👤 Открыть профиль клиента" in labels
         assert "🔓 Отвязать аккаунт" in labels
         assert "🔁 Сменить аккаунт" in labels
-        cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+        cbs = [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data]
         assert "cbind:unbind:7" in cbs
         assert "cbind:rebind:7" in cbs
+
+    def test_actions_kb_with_binding_username(self):
+        from handlers.admin import _build_contract_actions_kb
+        c = MagicMock(spec=Contract)
+        c.id = 9
+        c.telegram_id = 111
+        c.username = "alice"
+        markup = _build_contract_actions_kb(c)
+        labels = [b.text for row in markup.inline_keyboard for b in row]
+        urls = [b.url for row in markup.inline_keyboard for b in row if b.url]
+        assert "👤 Открыть @alice" in labels
+        assert "https://t.me/alice" in urls
 
     def test_actions_kb_without_binding(self):
         from handlers.admin import _build_contract_actions_kb
         c = MagicMock(spec=Contract)
         c.id = 8
         c.telegram_id = None
+        c.username = None
         markup = _build_contract_actions_kb(c)
         labels = [b.text for row in markup.inline_keyboard for b in row]
         assert labels == ["🔗 Привязать аккаунт"]
