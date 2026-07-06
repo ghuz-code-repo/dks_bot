@@ -616,6 +616,17 @@ async def rebook_accepted(callback: types.CallbackQuery, state: FSMContext, bot:
     with SessionLocal() as session:
         # Отменяем текущую запись
         old_booking = session.query(Booking).filter(Booking.id == active_booking_id).first()
+        if old_booking and not can_cancel_booking(old_booking.date, old_booking.time_slot):
+            await state.clear()
+            await callback.answer(
+                "⚠️ Отмена невозможна - прошёл срок отмены",
+                show_alert=True
+            )
+            await callback.message.answer(
+                get_message('welcome', lang),
+                reply_markup=get_client_keyboard(lang)
+            )
+            return
         if old_booking:
             old_booking.is_cancelled = True
             old_contract = session.query(Contract).filter(Contract.id == old_booking.contract_id).first()
@@ -674,6 +685,7 @@ async def rebook_accepted(callback: types.CallbackQuery, state: FSMContext, bot:
         cal_active_contract_apt=None,
         cal_selected_date=selected_date_str,
         cal_selected_time=selected_time_str,
+        cal_is_rebook=True,
     )
 
     # Показываем ввод телефона (договор уже известен из выбранной записи)
@@ -997,32 +1009,34 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
 
                 asyncio.create_task(_send_cancel())
 
-        notification_text = (
-            f"🔔 **Новая запись на прием!**\n\n"
-            f"👤 Клиент: {client_fio}\n"
-            f"📞 Тел: {user_phone}\n"
-            f"💬 TG: {format_tg_contact_md(contract.telegram_id, contract.username)}\n"
-            f"🏠 Объект: {house_name}\n"
-            f"🏢 Кв. {apt_num}, подъезд {contract.entrance}, этаж {contract.floor}\n"
-            f"📄 Договор: {contract.contract_num}\n"
-            f"📅 Дата: {selected_date.strftime('%d.%m.%Y')}\n"
-            f"⏰ Время: {time_str}"
-        )
+        # Если это перезапись — уведомление уже отправлено в rebook_accepted, второе не шлём
+        if not cancelled_info and not user_data.get('cal_is_rebook'):
+            notification_text = (
+                f"🔔 **Новая запись на прием!**\n\n"
+                f"👤 Клиент: {client_fio}\n"
+                f"📞 Тел: {user_phone}\n"
+                f"💬 TG: {format_tg_contact_md(contract.telegram_id, contract.username)}\n"
+                f"🏠 Объект: {house_name}\n"
+                f"🏢 Кв. {apt_num}, подъезд {contract.entrance}, этаж {contract.floor}\n"
+                f"📄 Договор: {contract.contract_num}\n"
+                f"📅 Дата: {selected_date.strftime('%d.%m.%Y')}\n"
+                f"⏰ Время: {time_str}"
+            )
 
-        recipients = [r[0] for r in session.query(Staff.telegram_id).all()]
-        if ADMIN_ID not in recipients:
-            recipients.append(ADMIN_ID)
+            recipients = [r[0] for r in session.query(Staff.telegram_id).all()]
+            if ADMIN_ID not in recipients:
+                recipients.append(ADMIN_ID)
 
-        tg_kb = build_tg_profile_kb(contract.telegram_id, contract.username)
+            tg_kb = build_tg_profile_kb(contract.telegram_id, contract.username)
 
-        async def send_booking_notifications():
-            for emp_id in recipients:
-                try:
-                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown", reply_markup=tg_kb)
-                except Exception as e:
-                    logging.error(f"Ошибка уведомления {emp_id}: {e}")
+            async def send_booking_notifications():
+                for emp_id in recipients:
+                    try:
+                        await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown", reply_markup=tg_kb)
+                    except Exception as e:
+                        logging.error(f"Ошибка уведомления {emp_id}: {e}")
 
-        asyncio.create_task(send_booking_notifications())
+            asyncio.create_task(send_booking_notifications())
 
     project_address = get_project_address(house_name, lang)
     address_line = f"📍 {project_address}\n" if project_address else ""
