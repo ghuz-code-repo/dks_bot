@@ -335,7 +335,7 @@ async def view_calendar_button(message: types.Message, state: FSMContext):
             # Одна запись — сразу показываем календарь для перезаписи
             booking = active_bookings[0]
             contract = session.query(Contract).filter(Contract.id == booking.contract_id).first()
-            await _show_calendar_for_house(message, state, user_id, lang, contract.house_name, contract, session)
+            await _show_calendar_for_house(message, state, lang, contract.house_name, contract, session)
         else:
             # Несколько записей — даём выбор
             builder = InlineKeyboardBuilder()
@@ -358,7 +358,7 @@ async def view_calendar_button(message: types.Message, state: FSMContext):
             )
 
 
-async def _show_calendar_for_house(message_or_callback, state: FSMContext, user_id: int, lang: str,
+async def _show_calendar_for_house(message_or_callback, state: FSMContext, lang: str,
                                     house_name: str, contract, session):
     """Показать календарь для конкретного ЖК"""
     today = date.today()
@@ -371,13 +371,12 @@ async def _show_calendar_for_house(message_or_callback, state: FSMContext, user_
     # Получаем лимит слотов для проекта
     slots_limit = get_project_slot_limit(session, house_name)
 
-    # Проверяем наличие активной записи по привязке договора
+    # Проверяем наличие активной записи по КОНКРЕТНОМУ договору (не по всем договорам ЖК,
+    # т.к. один tg_id может быть привязан сразу к нескольким договорам/квартирам)
     active_booking = (
         session.query(Booking)
-        .join(Contract, Booking.contract_id == Contract.id)
         .filter(
-            Contract.telegram_id == user_id,
-            Contract.house_name == house_name,
+            Booking.contract_id == contract.id,
             Booking.date >= today,
             Booking.is_cancelled == False
         )
@@ -450,7 +449,7 @@ async def calendar_booking_selected(callback: types.CallbackQuery, state: FSMCon
             await callback.answer("Договор не найден", show_alert=True)
             return
 
-        await _show_calendar_for_house(callback, state, user_id, lang, contract.house_name, contract, session)
+        await _show_calendar_for_house(callback, state, lang, contract.house_name, contract, session)
 
 
 @router.callback_query(F.data.startswith("cal_"), ClientSteps.calendar_viewing)
@@ -599,8 +598,11 @@ async def rebook_declined(callback: types.CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("rebook_yes_"), ClientSteps.calendar_rebook_confirming)
-async def rebook_accepted(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
-    """Пользователь согласился на перезапись — отменяем старую и показываем выбор договора"""
+async def rebook_accepted(callback: types.CallbackQuery, state: FSMContext):
+    """Пользователь согласился на перезапись — переходим к вводу телефона.
+    Старую запись НЕ отменяем и уведомление НЕ шлём здесь: и то, и другое произойдёт
+    атомарно вместе с созданием новой записи в _process_calendar_booking, чтобы не терять
+    старую запись, если клиент не дойдёт до конца шага с телефоном."""
     user_id = callback.from_user.id
     lang = get_user_language(user_id)
     user_data = await state.get_data()
@@ -610,11 +612,8 @@ async def rebook_accepted(callback: types.CallbackQuery, state: FSMContext, bot:
     parts = callback.data.split("_", 3)  # ['rebook', 'yes', 'YYYY-MM-DD', 'HH:MM']
     selected_date_str = parts[2]
     selected_time_str = parts[3]
-    selected_date = datetime.strptime(selected_date_str, '%Y-%m-%d').date()
-    house_name = user_data.get('cal_house_name')
 
     with SessionLocal() as session:
-        # Отменяем текущую запись
         old_booking = session.query(Booking).filter(Booking.id == active_booking_id).first()
         if old_booking and not can_cancel_booking(old_booking.date, old_booking.time_slot):
             await state.clear()
@@ -627,57 +626,7 @@ async def rebook_accepted(callback: types.CallbackQuery, state: FSMContext, bot:
                 reply_markup=get_client_keyboard(lang)
             )
             return
-        if old_booking:
-            old_booking.is_cancelled = True
-            old_contract = session.query(Contract).filter(Contract.id == old_booking.contract_id).first()
 
-            old_date_str = old_booking.date.strftime('%d.%m.%Y')
-            old_time_str = old_booking.time_slot.strftime('%H:%M')
-
-            session.commit()
-
-            # Уведомляем сотрудников об отмене.
-            # TG-контакт берём из записи (создатель), а не из договора (привязка могла смениться).
-            creator_id = old_booking.user_telegram_id
-            creator_username = (
-                old_contract.username
-                if old_contract and old_contract.telegram_id == creator_id
-                else None
-            )
-            notification_text = (
-                f"🔄 **Запись отменена (перезапись)!**\n\n"
-                f"👤 Клиент: {old_contract.client_fio if old_contract else 'N/A'}\n"
-                f"📞 Тел: {old_booking.client_phone or '—'}\n"
-                f"💬 TG: {format_tg_contact_md(creator_id, creator_username)}\n"
-                f"🏠 Объект: {house_name}\n"
-            )
-            if old_contract:
-                notification_text += (
-                    f"🏢 Кв. {old_contract.apt_num}, подъезд {old_contract.entrance}, этаж {old_contract.floor}\n"
-                    f"📄 Договор: {old_contract.contract_num}\n"
-                )
-            notification_text += (
-                f"📅 Дата: {old_date_str}\n"
-                f"⏰ Время: {old_time_str}\n\n"
-                f"Клиент перезаписывается на {selected_date.strftime('%d.%m.%Y')} {selected_time_str}"
-            )
-
-            recipients = [r[0] for r in session.query(Staff.telegram_id).all()]
-            if ADMIN_ID not in recipients:
-                recipients.append(ADMIN_ID)
-
-            tg_kb = build_tg_profile_kb(creator_id, creator_username)
-
-            async def send_rebook_notifications():
-                for emp_id in recipients:
-                    try:
-                        await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown", reply_markup=tg_kb)
-                    except Exception as e:
-                        logging.error(f"Ошибка уведомления {emp_id}: {e}")
-
-            asyncio.create_task(send_rebook_notifications())
-
-    # Обновляем данные — активной записи больше нет
     await state.update_data(
         cal_active_booking_date=None,
         cal_active_booking_id=None,
@@ -930,14 +879,13 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
             contract.username = source.from_user.username
             contract.href = build_tg_href(user_id, source.from_user.username)
 
-        # Отменяем все активные записи по договорам этого пользователя на ЖК
+        # Отменяем активные записи по ЭТОМУ договору (не по всем договорам пользователя на ЖК,
+        # т.к. один tg_id может быть привязан сразу к нескольким договорам/квартирам)
         today = date.today()
         active_bookings = (
             session.query(Booking)
-            .join(Contract, Booking.contract_id == Contract.id)
             .filter(
-                Contract.telegram_id == user_id,
-                Contract.house_name == house_name,
+                Booking.contract_id == contract_id,
                 Booking.date >= today,
                 Booking.is_cancelled == False
             )
@@ -1009,7 +957,7 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
 
                 asyncio.create_task(_send_cancel())
 
-        # Если это перезапись — уведомление уже отправлено в rebook_accepted, второе не шлём
+        # Если были отменённые записи — уведомление о них уже отправлено выше, второе не шлём
         if not cancelled_info and not user_data.get('cal_is_rebook'):
             notification_text = (
                 f"🔔 **Новая запись на прием!**\n\n"
