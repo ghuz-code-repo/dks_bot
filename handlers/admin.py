@@ -6,6 +6,7 @@ from utils.auth import is_admin, is_staff
 import pandas as pd
 from aiogram import Bot
 from aiogram import Router, F, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile
@@ -2999,12 +3000,23 @@ async def process_contract_lookup(message: types.Message, state: FSMContext):
 
     # Состояние не сбрасываем — админ может ввести ещё один номер договора
     # или выйти кнопкой «⬅️ Назад».
-    await message.answer(
-        text,
-        parse_mode="HTML",
-        reply_markup=_build_contract_actions_kb(contract),
-        disable_web_page_preview=True,
-    )
+    try:
+        await message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=_build_contract_actions_kb(contract),
+            disable_web_page_preview=True,
+        )
+    except TelegramBadRequest as e:
+        if "BUTTON_USER_PRIVACY_RESTRICTED" not in str(e):
+            raise
+        # Клиент ограничил ссылку на профиль по ID приватностью — шлём без неё
+        await message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=_build_contract_actions_kb(contract, include_profile_link=False),
+            disable_web_page_preview=True,
+        )
     await message.answer(
         "Введите номер другого договора, выберите действие выше "
         "или нажмите «⬅️ Назад», чтобы выйти из поиска.",
@@ -3016,11 +3028,16 @@ async def process_contract_lookup(message: types.Message, state: FSMContext):
 # Изменение привязки договора к Telegram-аккаунту
 # ====================================================================
 
-def _build_contract_actions_kb(contract: Contract):
-    """Inline-клавиатура с действиями над договором (под карточкой)."""
+def _build_contract_actions_kb(contract: Contract, include_profile_link: bool = True):
+    """Inline-клавиатура с действиями над договором (под карточкой).
+
+    include_profile_link=False пропускает кнопку ссылки на профиль — используется
+    как фолбэк, когда Telegram отклоняет tg://user?id=... из-за настроек приватности
+    клиента (BUTTON_USER_PRIVACY_RESTRICTED).
+    """
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     builder = InlineKeyboardBuilder()
-    if contract.telegram_id or contract.username:
+    if include_profile_link and (contract.telegram_id or contract.username):
         if contract.username:
             url = f"https://t.me/{contract.username}"
             text = f"👤 Открыть @{contract.username}"
@@ -3575,12 +3592,22 @@ async def cb_rebind_apply(callback: types.CallbackQuery, state: FSMContext):
         pass
 
     await callback.message.answer("✅ Привязка обновлена. Актуальная карточка ниже:")
-    await callback.message.answer(
-        text,
-        parse_mode="HTML",
-        reply_markup=kb,
-        disable_web_page_preview=True,
-    )
+    try:
+        await callback.message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+    except TelegramBadRequest as e:
+        if "BUTTON_USER_PRIVACY_RESTRICTED" not in str(e):
+            raise
+        await callback.message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=_build_contract_actions_kb(contract, include_profile_link=False),
+            disable_web_page_preview=True,
+        )
     await callback.message.answer(
         "Введите номер другого договора или нажмите «⬅️ Назад», "
         "чтобы выйти из поиска.",
