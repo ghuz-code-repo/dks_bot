@@ -1,3 +1,4 @@
+import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -116,3 +117,17 @@ def _run_migrations():
             "ON contract_binding_log(admin_telegram_id)"
         ))
         conn.commit()
+
+        # Защита от гонки при одновременных заявках: на один договор+дату+время
+        # не может быть двух активных (не отменённых) записей.
+        try:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_bookings_active_slot "
+                "ON bookings(contract_id, date, time_slot) WHERE is_cancelled = 0"
+            ))
+            conn.commit()
+        except Exception:
+            logging.exception(
+                "Не удалось создать ux_bookings_active_slot — в таблице bookings "
+                "уже есть дублирующиеся активные записи, требуется ручная чистка"
+            )

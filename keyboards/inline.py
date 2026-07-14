@@ -2,6 +2,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import time, datetime, timedelta, date, timezone
 import calendar
 from aiogram import types
+from aiogram.exceptions import TelegramBadRequest
 from utils.holidays import get_holiday_dates
 
 # Часовой пояс Ташкента (UTC+5)
@@ -29,6 +30,23 @@ def build_tg_profile_kb(telegram_id: int | None, username: str | None) -> "types
     builder = InlineKeyboardBuilder()
     builder.row(types.InlineKeyboardButton(text=text, url=url))
     return builder.as_markup()
+
+
+async def send_staff_notification(bot, chat_id: int, text: str, kb=None, *, parse_mode: str = "Markdown") -> None:
+    """Отправить уведомление сотруднику с фолбэком без кнопки-профиля.
+
+    Если Telegram отклоняет кнопку tg://user?id=... из-за настроек приватности
+    клиента (BUTTON_USER_PRIVACY_RESTRICTED), всё сообщение целиком не уходит —
+    поэтому в этом случае повторяем отправку без reply_markup, чтобы сотрудник
+    всё равно получил уведомление.
+    """
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=kb)
+    except TelegramBadRequest as e:
+        if kb is not None and "BUTTON_USER_PRIVACY_RESTRICTED" in str(e):
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+        else:
+            raise
 
 
 def get_next_working_day(from_date: date) -> date:

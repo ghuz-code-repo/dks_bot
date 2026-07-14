@@ -8,11 +8,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 
 from config import ADMIN_ID, DKS_CONTACTS
 from database.models import Booking, Setting, Contract, Staff, ProjectSlots
 from database.session import SessionLocal
-from keyboards.inline import generate_time_slots, generate_calendar, get_min_booking_date, get_fully_booked_dates, SLOTS_PER_DAY, TASHKENT_TZ, build_tg_profile_kb
+from keyboards.inline import generate_time_slots, generate_calendar, get_min_booking_date, get_fully_booked_dates, SLOTS_PER_DAY, TASHKENT_TZ, build_tg_profile_kb, send_staff_notification
 from utils.holidays import get_holiday_dates
 from keyboards.reply import get_phone_request_keyboard, get_client_keyboard, BUTTON_TEXTS
 from utils.states import ClientSteps
@@ -924,7 +925,16 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
             client_phone=user_phone
         )
         session.add(new_booking)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            await state.clear()
+            await send_message(
+                "⚠️ Извините, это время только что заняли. Пожалуйста, выберите другое.",
+                reply_markup=get_client_keyboard(lang)
+            )
+            return
 
         # Уведомляем сотрудников об отменённых записях
         if cancelled_info:
@@ -951,7 +961,7 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
                 async def _send_cancel(text=cancel_notification, recips=list(recipients), kb=tg_kb):
                     for emp_id in recips:
                         try:
-                            await bot.send_message(chat_id=emp_id, text=text, parse_mode="Markdown", reply_markup=kb)
+                            await send_staff_notification(bot, emp_id, text, kb)
                         except Exception as e:
                             logging.error(f"Ошибка уведомления {emp_id}: {e}")
 
@@ -980,7 +990,7 @@ async def _process_calendar_booking(source, state: FSMContext, bot: Bot, user_ph
             async def send_booking_notifications():
                 for emp_id in recipients:
                     try:
-                        await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown", reply_markup=tg_kb)
+                        await send_staff_notification(bot, emp_id, notification_text, tg_kb)
                     except Exception as e:
                         logging.error(f"Ошибка уведомления {emp_id}: {e}")
 
@@ -1702,7 +1712,7 @@ async def confirm_cancel_booking(callback: types.CallbackQuery, state: FSMContex
         async def send_cancel_notifications():
             for emp_id in recipients:
                 try:
-                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown", reply_markup=tg_kb)
+                    await send_staff_notification(bot, emp_id, notification_text, tg_kb)
                 except Exception as e:
                     logging.error(f"Ошибка уведомления {emp_id}: {e}")
         
@@ -2162,7 +2172,16 @@ async def process_phone_booking_callback(callback: types.CallbackQuery, state: F
             client_phone=user_phone
         )
         session.add(new_booking)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            await state.clear()
+            await callback.message.answer(
+                "⚠️ Извините, это время только что заняли. Пожалуйста, выберите другое.",
+                reply_markup=get_client_keyboard(lang)
+            )
+            return
 
         # Уведомление сотрудников
         notification_text = (
@@ -2188,7 +2207,7 @@ async def process_phone_booking_callback(callback: types.CallbackQuery, state: F
         async def send_booking_notifications():
             for emp_id in recipients:
                 try:
-                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown", reply_markup=tg_kb)
+                    await send_staff_notification(bot, emp_id, notification_text, tg_kb)
                 except Exception as e:
                     logging.error(f"Ошибка уведомления {emp_id}: {e}")
         
@@ -2332,7 +2351,16 @@ async def process_phone_booking(message: types.Message, state: FSMContext, bot: 
             client_phone=user_phone
         )
         session.add(new_booking)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            await state.clear()
+            await message.answer(
+                "⚠️ Извините, это время только что заняли. Пожалуйста, выберите другое.",
+                reply_markup=get_client_keyboard(lang)
+            )
+            return
 
         # Уведомление сотрудников
         notification_text = (
@@ -2358,7 +2386,7 @@ async def process_phone_booking(message: types.Message, state: FSMContext, bot: 
         async def send_booking_notifications():
             for emp_id in recipients:
                 try:
-                    await bot.send_message(chat_id=emp_id, text=notification_text, parse_mode="Markdown", reply_markup=tg_kb)
+                    await send_staff_notification(bot, emp_id, notification_text, tg_kb)
                 except Exception as e:
                     logging.error(f"Ошибка уведомления {emp_id}: {e}")
         

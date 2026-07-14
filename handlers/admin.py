@@ -25,7 +25,7 @@ from keyboards.reply import (
     get_admin_keyboard, get_staff_management_keyboard, 
     get_slots_management_keyboard, get_cancel_keyboard
 )
-from keyboards.inline import generate_houses_kb, build_tg_profile_kb
+from keyboards.inline import generate_houses_kb, build_tg_profile_kb, send_staff_notification
 
 router = Router()
 
@@ -2782,7 +2782,7 @@ async def holidays_conflict_cancel(callback: types.CallbackQuery, state: FSMCont
             kb = build_tg_profile_kb(p['tg_id'], p['username'])
             for emp_id in recipients:
                 try:
-                    await bot.send_message(chat_id=emp_id, text=text, parse_mode="Markdown", reply_markup=kb)
+                    await send_staff_notification(bot, emp_id, text, kb)
                 except Exception as e:
                     logging.error(f"Ошибка уведомления {emp_id}: {e}")
 
